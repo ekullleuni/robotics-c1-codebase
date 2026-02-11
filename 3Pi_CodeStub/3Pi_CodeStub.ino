@@ -145,7 +145,7 @@ float speed_e1 = 0.0;  // LEFT wheel speed (encoder 1)
 
 // PID update timing
 unsigned long pid_update_ts = 0;
-#define PID_UPDATE_INTERVAL 10  // Update PID every 50ms
+#define PID_UPDATE_INTERVAL 10  // Update PID every 10ms
 
 // Speed demands (in counts per millisecond)
 float demand_speed_left = 0.0;
@@ -176,13 +176,13 @@ bool line_sensors_calibrated = false;
 
 // Pose update timing (should match speed measurement interval)
 unsigned long pose_update_ts = 0;
-#define POSE_UPDATE_INTERVAL 20  // Update pose every 20ms
+#define POSE_UPDATE_INTERVAL 1  // Update pose every 20ms
 
 // Turn behavior variables
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
-#define TURN_THRESHOLD 0.05        // Stop turning when within ±0.05 radians (~2.9°)
-#define TURN_GAIN 50.0             // Proportional gain for turning (adjust based on testing)
+#define TURN_THRESHOLD 0.01        // Stop turning when within ±0.05 radians (~2.9°)
+#define TURN_GAIN 1.1             // Proportional gain for turning (adjust based on testing)
 
 // Travel behavior variables
 float target_x = 0.0;              // Target X coordinate (mm)
@@ -406,9 +406,9 @@ void setup() {
   // black/white pattern at start position) before powering on!
   //
   // Uncomment the following line to enable calibration at startup:
-  calibrateLineSensors();
+  //calibrateLineSensors();
 
-  Serial.println("Stage 5: Line sensors initialized");
+  //Serial.println("Stage 5: Line sensors initialized");
 
   // Re-initialise pose AFTER the calibration spin so the 3 s
   // of rotation does not corrupt the starting odometry.
@@ -438,23 +438,7 @@ void setup() {
   // calibration spin (3 s) does not count against the run.
   timer_start_ms = millis();
 
-  // Kick off navigation to the first waypoint in the sequence
-  travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
-
-  Serial.println();
-  Serial.println("=================================");
-  Serial.println("  Waypoint navigation active");
-  Serial.print("  First target: wp");
-  Serial.print(waypoint_order[0] + 1);   // 1-based for readability
-  Serial.print(" (");
-  Serial.print(waypoint_x[waypoint_order[0]]);
-  Serial.print(", ");
-  Serial.print(waypoint_y[waypoint_order[0]]);
-  Serial.println(")");
-  Serial.print("  Timer: ");
-  Serial.print((int)(TIMER_DURATION_MS / 1000));
-  Serial.println(" s");
-  Serial.println("=================================");
+  setTurn(-(PI/2));
 }
 
 // ============================================
@@ -588,11 +572,21 @@ void updatePID() {
       // NOTE: Encoder mapping from Encoders.h:
       //   count_e0 / speed_e0 = RIGHT wheel
       //   count_e1 / speed_e1 = LEFT wheel
+      if (demand_speed_left == 0.0) {
+        // If demand is zero, stop motor and reset PID to prevent windup
+        left_pwm_output = 0.0;
+        left_pid.reset();
+      } else {
       left_pwm_output = left_pid.update(demand_speed_left, speed_e1);   // Use e1 for left motor
-
+      }
       // Update right motor PID
+      if (demand_speed_right == 0.0) {
+        // If demand is zero, stop motor and reset PID to prevent windup
+        right_pwm_output = 0.0;
+        right_pid.reset();
+      } else {
       right_pwm_output = right_pid.update(demand_speed_right, speed_e0); // Use e0 for right motor
-
+      }
       // Apply PID outputs to motors
       motors.setPWM(left_pwm_output, right_pwm_output);
 
@@ -844,10 +838,14 @@ void setTurn(float angle) {
  * @return: true if turn complete, false if still turning
  */
 bool checkTurn() {
-  if (!turning) return true;  // Not turning, return complete
+  if (!turning) {
+    Serial.println("finished turning");
+    return true;  // Not turning, return complete
+  }
 
   // Calculate angular difference (smallest angle)
   float angle_error = angleDiff(target_angle, pose.theta);
+  Serial.println(angle_error, 2);
 
   // Check if turn is complete
   if (abs(angle_error) < TURN_THRESHOLD) {
@@ -869,7 +867,7 @@ bool checkTurn() {
     // Using PID speed control
     // Left wheel: positive speed turns left
     // Right wheel: negative speed turns right
-    setDemandSpeeds(turn_speed, -turn_speed);
+    setDemandSpeeds(-turn_speed, turn_speed);
   } else {
     // Direct PWM control
     float turn_pwm = turn_speed;
@@ -1033,169 +1031,11 @@ bool updateTravelToXY() {
 
 // put your main code here, to run repeatedly:
 void loop() {
-
   // ============================================
   // CONTINUOUS SYSTEM UPDATES (every iteration)
   // ============================================
   measureSpeeds();   // Stage 3 – encoder speeds   (20 ms interval)
   updatePID();       // Stage 4 – closed-loop motor control
-  updatePose();      // Stage 7 – dead-reckoning odometry (20 ms interval)
-
-  // ============================================
-  // STAGE 6: COUNTDOWN TIMER (Serial output)
-  // ============================================
-  unsigned long elapsed_ms   = millis() - timer_start_ms;
-  unsigned long remaining_ms = (elapsed_ms >= TIMER_DURATION_MS) ? 0 : (TIMER_DURATION_MS - elapsed_ms);
-  int remaining_sec          = (int)(remaining_ms / 1000);
-
-  // Print remaining time and current state once per second
-  if (millis() - countdown_print_ts >= 1000) {
-    Serial.print("T-");
-    Serial.print(remaining_sec);
-    Serial.print("s  State:");
-    switch (robot_state) {
-      case STATE_TRAVEL_TO_WAYPOINT: Serial.print("TO_WP");  Serial.print(waypoint_order[current_waypoint_idx]+1); break;
-      case STATE_AT_WAYPOINT:        Serial.print("AT_WP");   Serial.print(waypoint_order[current_waypoint_idx]+1); break;
-      case STATE_REVERSING:          Serial.print("REVERSING");   break;
-      case STATE_TURNING:            Serial.print("TURNING");     break;
-      case STATE_RETURN_HOME:        Serial.print("RETURN_HOME"); break;
-      case STATE_STOPPED:            Serial.print("STOPPED");     break;
-    }
-    Serial.println();
-    countdown_print_ts = millis();
+  updatePose();
+  checkTurn();      // Stage 7 – dead-reckoning odometry (20 ms interval)
   }
-
-  // ============================================
-  // STAGE 6: TIMER EXPIRY CHECK
-  // ============================================
-  // Once time runs out, leave whatever search state we are in
-  // and start navigating back to (0, 0) using odometry.
-  if (remaining_sec <= 0
-      && robot_state != STATE_RETURN_HOME
-      && robot_state != STATE_STOPPED) {
-
-    Serial.println("*** TIME EXPIRED – returning to start ***");
-    robot_state = STATE_RETURN_HOME;
-    travelToXY(0.0, 0.0);  // Kick off kinematics-based return
-  }
-
-  // ============================================
-  // STAGE 6: MAIN FINITE STATE MACHINE
-  // ============================================
-  switch (robot_state) {
-
-    // --------------------------------------------------
-    // TRAVEL_TO_WAYPOINT – navigate toward the next puck
-    // --------------------------------------------------
-    case STATE_TRAVEL_TO_WAYPOINT:
-      // Safety: if we hit the map boundary while travelling,
-      // abort the current leg and do a reverse + random turn.
-      if (isOnLine()) {
-        Serial.println("Line detected during travel! Safety reverse...");
-        stopWithPID();
-        robot_state = STATE_REVERSING;
-        maneuver_ts = millis();
-        break;
-      }
-
-      // updateTravelToXY() returns true once the waypoint is reached
-      if (updateTravelToXY()) {
-        Serial.print("Arrived at wp");
-        Serial.println(waypoint_order[current_waypoint_idx] + 1);
-        stopWithPID();
-        robot_state  = STATE_AT_WAYPOINT;
-        maneuver_ts  = millis();  // start the pause timer
-      }
-      break;
-
-    // --------------------------------------------------
-    // AT_WAYPOINT – short pause (Stage 9 will add puck check)
-    // --------------------------------------------------
-    case STATE_AT_WAYPOINT:
-      if (millis() - maneuver_ts >= WAYPOINT_PAUSE_MS) {
-        // Advance to the next waypoint in the visit sequence
-        current_waypoint_idx++;
-        if (current_waypoint_idx >= NUM_WAYPOINTS) {
-          current_waypoint_idx = 0;  // wrap and repeat the circuit
-        }
-
-        // Kick off navigation to the next waypoint
-        travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
-                   waypoint_y[waypoint_order[current_waypoint_idx]]);
-
-        Serial.print("Heading to wp");
-        Serial.print(waypoint_order[current_waypoint_idx] + 1);
-        Serial.print(" (");
-        Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
-        Serial.print(", ");
-        Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
-        Serial.println(")");
-
-        robot_state = STATE_TRAVEL_TO_WAYPOINT;
-      }
-      break;
-
-    // --------------------------------------------------
-    // REVERSING – back away from the boundary
-    // --------------------------------------------------
-    case STATE_REVERSING:
-      setDemandSpeeds(REVERSE_SPEED, REVERSE_SPEED);
-
-      if (millis() - maneuver_ts >= REVERSE_DURATION) {
-        // Reverse done – pick a random turn duration and direction
-        turn_duration  = random(MIN_TURN_DURATION, MAX_TURN_DURATION);
-        turn_direction = (random(2) == 0) ? -1 : 1;
-
-        Serial.print("Turning ");
-        Serial.print(turn_direction > 0 ? "LEFT" : "RIGHT");
-        Serial.print(" for ");
-        Serial.print(turn_duration);
-        Serial.println(" ms");
-
-        robot_state = STATE_TURNING;
-        maneuver_ts = millis();
-      }
-      break;
-
-    // --------------------------------------------------
-    // TURNING – rotate on the spot, then resume waypoint nav
-    // --------------------------------------------------
-    case STATE_TURNING:
-      // turn_direction +1 → left wheel back / right fwd (turns left)
-      setDemandSpeeds(-TURN_SPEED * turn_direction,
-                       TURN_SPEED * turn_direction);
-
-      if (millis() - maneuver_ts >= turn_duration) {
-        Serial.println("Turn complete. Resuming waypoint travel...");
-        // Resume travel to the SAME waypoint we were heading to
-        travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
-                   waypoint_y[waypoint_order[current_waypoint_idx]]);
-        robot_state = STATE_TRAVEL_TO_WAYPOINT;
-      }
-      break;
-
-    // --------------------------------------------------
-    // RETURN_HOME – navigate back to start using odometry
-    // --------------------------------------------------
-    case STATE_RETURN_HOME:
-      // updateTravelToXY() returns true once (0,0) is reached
-      if (updateTravelToXY()) {
-        Serial.println("*** Arrived at start. Run complete. ***");
-        stopWithPID();
-        robot_state = STATE_STOPPED;
-      }
-      break;
-
-    // --------------------------------------------------
-    // STOPPED – run is finished, hold motors off
-    // --------------------------------------------------
-    case STATE_STOPPED:
-      stopWithPID();
-      break;
-  }
-
-  // If you are using an OLED or LCD display,
-  // the following will update the display with
-  // the time remaining in seconds.
-  //display.timeRemaining();
-}
