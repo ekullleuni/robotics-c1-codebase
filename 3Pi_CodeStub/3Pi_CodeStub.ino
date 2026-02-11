@@ -128,7 +128,7 @@ PID_c right_pid;  // PID controller for right motor
 
 // Speed measurement timing
 unsigned long speed_measurement_ts = 0;
-#define SPEED_MEASUREMENT_INTERVAL 20  // Measure speed every 20ms
+#define SPEED_MEASUREMENT_INTERVAL 5  // Measure speed every 20ms
 
 // Previous encoder counts (for calculating change over time)
 long prev_count_e0 = 0;
@@ -145,7 +145,7 @@ float speed_e1 = 0.0;  // LEFT wheel speed (encoder 1)
 
 // PID update timing
 unsigned long pid_update_ts = 0;
-#define PID_UPDATE_INTERVAL 10  // Update PID every 10ms
+#define PID_UPDATE_INTERVAL 5  // Update PID every 10ms
 
 // Speed demands (in counts per millisecond)
 float demand_speed_left = 0.0;
@@ -176,21 +176,24 @@ bool line_sensors_calibrated = false;
 
 // Pose update timing (should match speed measurement interval)
 unsigned long pose_update_ts = 0;
-#define POSE_UPDATE_INTERVAL 1  // Update pose every 20ms
+#define POSE_UPDATE_INTERVAL 5  // Update pose every 20ms (matches speed measurement interval)
 
 // Turn behavior variables
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
 #define TURN_THRESHOLD 0.01        // Stop turning when within ±0.05 radians (~2.9°)
-#define TURN_GAIN 1.1             // Proportional gain for turning (adjust based on testing)
+#define TURN_GAIN 1.5             // Proportional gain for turning (adjust based on testing)
 
 // Travel behavior variables
 float target_x = 0.0;              // Target X coordinate (mm)
 float target_y = 0.0;              // Target Y coordinate (mm)
+float init_x = 0.0;                // Starting X coordinate for travel (mm)
+float init_y = 0.0;                // Starting Y coordinate for travel (mm)
+float target_init_dist = 0.0;       // Distance to target (mm)
 bool traveling = false;            // Is robot currently traveling?
 #define TRAVEL_THRESHOLD 10.0      // Stop when within 10mm of target
-#define TRAVEL_SPEED 0.3           // Base forward speed (counts/ms)
-#define HEADING_CORRECTION_GAIN 0.5  // Gain for heading correction during travel
+#define TRAVEL_SPEED 0.5           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
+#define HEADING_CORRECTION_GAIN 0.001  // Gain for heading correction during travel
 
 // Combined travelToXY behavior
 enum TravelState {
@@ -364,8 +367,8 @@ void setup() {
   // These are initial guesses and MUST be tuned physically
   // NOTE: Kp must be large because speed is in counts/ms (small values)
   //       but PWM needs to be 20-255 (large values)
-  float initial_Kp = 30.0;  // Start with proportional control only
-  float initial_Ki = 0.5;    // Integral term disabled initially
+  float initial_Kp = 40.0;  // Start with proportional control only
+  float initial_Ki = 0.8;    // Integral term disabled initially
   float initial_Kd = 0.0;    // Derivative term disabled initially
 
   // Initialize left motor PID
@@ -438,7 +441,7 @@ void setup() {
   // calibration spin (3 s) does not count against the run.
   timer_start_ms = millis();
 
-  setTurn(-(PI/2));
+  robot_state = STATE_TRAVEL_TO_WAYPOINT;
 }
 
 // ============================================
@@ -575,7 +578,6 @@ void updatePID() {
       if (demand_speed_left == 0.0) {
         // If demand is zero, stop motor and reset PID to prevent windup
         left_pwm_output = 0.0;
-        left_pid.reset();
       } else {
       left_pwm_output = left_pid.update(demand_speed_left, speed_e1);   // Use e1 for left motor
       }
@@ -583,7 +585,6 @@ void updatePID() {
       if (demand_speed_right == 0.0) {
         // If demand is zero, stop motor and reset PID to prevent windup
         right_pwm_output = 0.0;
-        right_pid.reset();
       } else {
       right_pwm_output = right_pid.update(demand_speed_right, speed_e0); // Use e0 for right motor
       }
@@ -895,6 +896,9 @@ bool checkTurn() {
 void setTravel(float x, float y) {
   target_x = x;
   target_y = y;
+  init_x = pose.x;  // Capture starting position for distance tracking
+  init_y = pose.y;
+  target_init_dist = distanceToPoint(target_x, target_y);
   traveling = true;
 }
 
@@ -910,9 +914,9 @@ bool checkTravel() {
 
   // Calculate distance to target
   float distance = distanceToPoint(target_x, target_y);
-
+  float distance_traveled = distanceToPoint(init_x, init_y);
   // Check if travel is complete
-  if (distance < TRAVEL_THRESHOLD) {
+  if (distance < TRAVEL_THRESHOLD || distance_traveled >= target_init_dist) {
     // Stop motors
     if (use_pid_control) {
       setDemandSpeeds(0.0, 0.0);
@@ -987,12 +991,15 @@ void travelToXY(float x, float y) {
  * @return: true if navigation complete, false otherwise
  */
 bool updateTravelToXY() {
+  Serial.println("here1");
   switch (travel_state) {
     case TRAVEL_IDLE:
       // Not navigating
       return true;
 
-    case TRAVEL_ROTATING:
+    case TRAVEL_ROTATING: {
+      Serial.println("here2");
+
       // Calculate angle to target
       float desired_angle = angleToPoint(target_x, target_y);
 
@@ -1007,10 +1014,14 @@ bool updateTravelToXY() {
         travel_state = TRAVEL_MOVING;
       }
       return false;
+    }
 
     case TRAVEL_MOVING:
+      Serial.println("here");
+
       // If not yet started traveling, initialize travel
       if (!traveling) {
+        Serial.println("started traveling");
         setTravel(target_x, target_y);
       }
 
@@ -1037,5 +1048,4 @@ void loop() {
   measureSpeeds();   // Stage 3 – encoder speeds   (20 ms interval)
   updatePID();       // Stage 4 – closed-loop motor control
   updatePose();
-  checkTurn();      // Stage 7 – dead-reckoning odometry (20 ms interval)
-  }
+}
