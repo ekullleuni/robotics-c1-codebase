@@ -441,7 +441,7 @@ void setup() {
   // calibration spin (3 s) does not count against the run.
   timer_start_ms = millis();
 
-  robot_state = STATE_TRAVEL_TO_WAYPOINT;
+  travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
 }
 
 // ============================================
