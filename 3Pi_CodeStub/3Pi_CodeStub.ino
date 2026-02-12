@@ -46,7 +46,7 @@
 // Labsheet 2: Operate the magnetometer to detect the 
 //             puck.  You will need to follow the steps
 //             to install the software library.
-//#include "Magnetometer.h" // Labsheet 2 
+#include "Magnetometer.h" // Labsheet 2
 
 // Labsheet 3: Calibrate and use kinematics to allow 
 //             your robot to turn and travel between
@@ -105,7 +105,7 @@ LineSensors_c line_sensors;
 // Labsheet 2, so you can leave this commented
 // out.
 // See Labsheet 2.
-//Magnetometer_c magnetometer;
+Magnetometer_c magnetometer;
 
 // Instance of a class to estimate the pose
 // of the robot.  You will need to calibrate
@@ -169,6 +169,31 @@ float right_pwm_output = 0.0;
 
 // Flag to indicate if line sensors have been calibrated
 bool line_sensors_calibrated = false;
+
+// ============================================
+// STAGE 9: MAGNETOMETER VARIABLES
+// ============================================
+
+// Non-blocking read interval (sensor needs >= 100 ms between reads)
+unsigned long mag_read_ts = 0;
+#define MAG_READ_INTERVAL 100
+
+// Puck detection threshold on calibrated magnitude.
+// Baseline (Earth field only) reads ~1.0 after calibration.
+// A magnetic puck within ~80 mm raises the magnitude.
+//
+// HUMAN CALIBRATION REQUIRED:
+//   1. With no puck: confirm magnitude prints ~1.0
+//   2. Move puck toward sensor and note the value where
+//      you want detection to trigger
+//   3. Set PUCK_MAGNITUDE_THRESHOLD to that value
+#define PUCK_MAGNITUDE_THRESHOLD 1.5
+
+// Latest magnitude reading (updated by readMagnetometer())
+float mag_magnitude = 0.0;
+
+// Whether magnetometer initialised successfully
+bool mag_ok = false;
 
 // ============================================
 // STAGE 7: KINEMATICS & NAVIGATION VARIABLES
@@ -413,8 +438,21 @@ void setup() {
 
   //Serial.println("Stage 5: Line sensors initialized");
 
-  // Re-initialise pose AFTER the calibration spin so the 3 s
-  // of rotation does not corrupt the starting odometry.
+  // ============================================
+  // STAGE 9: Initialize & Calibrate Magnetometer
+  // ============================================
+  // Must happen BEFORE the pose reinit so the calibration
+  // spin is not counted in the starting odometry.
+  mag_ok = magnetometer.initialise();
+  if ( mag_ok ) {
+    Serial.println("Stage 9: Magnetometer found on I2C bus");
+    calibrateMagnetometer();
+  } else {
+    Serial.println("WARNING: Magnetometer NOT found! Puck detection disabled.");
+  }
+
+  // Re-initialise pose AFTER calibration spins so rotation
+  // does not corrupt the starting odometry.
   pose.initialise(0, 0, 0);
 
   // ============================================
@@ -500,6 +538,94 @@ void calibrateLineSensors() {
 
   // Short delay before continuing
   delay(500);
+}
+
+
+// ============================================
+// STAGE 9: MAGNETOMETER CALIBRATION FUNCTION
+// ============================================
+// Rotates the robot on the spot for ~5 seconds while
+// capturing min/max magnetometer readings on each axis.
+// This MUST run in setup() because it uses delay() and
+// blocks the event loop (same approach as calibrateLineSensors).
+//
+// Place the robot on a flat surface AWAY from metal objects
+// (table legs, laptops, phones) before running.
+void calibrateMagnetometer() {
+
+  Serial.println("Starting magnetometer calibration...");
+  Serial.println("Robot will rotate for 5 seconds.");
+
+  magnetometer.resetCalibration();
+
+  // Rotate on the spot (slow spin to cover 360+ degrees)
+  motors.setPWM(-30, 30);
+
+  unsigned long cal_start = millis();
+  unsigned long cal_duration = 5000;  // 5 seconds ensures full rotation
+
+  while ( millis() - cal_start < cal_duration ) {
+    // Update calibration with latest reading
+    magnetometer.updateCalibration();
+    // 100 ms between reads to respect sensor timing
+    delay(100);
+  }
+
+  // Stop motors
+  motors.setPWM(0, 0);
+
+  // Compute offset and scaling from captured min/max
+  magnetometer.finalizeCalibration();
+
+  // Report calibration results
+  Serial.println("Magnetometer calibration complete!");
+  for ( int i = 0; i < MAG_AXIS; i++ ) {
+    Serial.print("  Axis ");
+    Serial.print(i);
+    Serial.print(": min=");
+    Serial.print(magnetometer.minimum[i], 0);
+    Serial.print(", max=");
+    Serial.print(magnetometer.maximum[i], 0);
+    Serial.print(", offset=");
+    Serial.print(magnetometer.offset[i], 1);
+    Serial.print(", scaling=");
+    Serial.println(magnetometer.scaling[i], 1);
+  }
+
+  delay(500);
+}
+
+// ============================================
+// STAGE 9: NON-BLOCKING MAGNETOMETER READ
+// ============================================
+// Call from loop(). Respects the 100 ms minimum interval
+// between I2C reads.  Updates mag_magnitude with the
+// latest calibrated vector magnitude.
+void readMagnetometer() {
+  if ( !mag_ok ) return;  // Sensor failed to init
+
+  unsigned long now = millis();
+  if ( now - mag_read_ts >= MAG_READ_INTERVAL ) {
+    magnetometer.getReadings();
+    mag_magnitude = magnetometer.getMagnitude();
+    mag_read_ts = now;
+
+    // TEMPORARY: print magnitude for threshold calibration
+    // Remove this once PUCK_MAGNITUDE_THRESHOLD is set
+    Serial.print("MAG:");
+    Serial.println(mag_magnitude, 3);
+  }
+}
+
+// ============================================
+// STAGE 9: PUCK DETECTION WRAPPER
+// ============================================
+// Returns true if the latest magnitude reading exceeds
+// PUCK_MAGNITUDE_THRESHOLD.  Safe to call every loop
+// iteration; it uses the cached mag_magnitude updated
+// by readMagnetometer().
+bool detectPuck() {
+  return ( mag_magnitude > PUCK_MAGNITUDE_THRESHOLD );
 }
 
 
@@ -848,7 +974,6 @@ bool checkTurn() {
 
   // Calculate angular difference (smallest angle)
   float angle_error = angleDiff(target_angle, pose.theta);
-  Serial.println(angle_error, 2);
 
   // Check if turn is complete
   if (abs(angle_error) < TURN_THRESHOLD) {
@@ -1008,14 +1133,12 @@ void travelToXY(float x, float y) {
  * @return: true if navigation complete, false otherwise
  */
 bool updateTravelToXY() {
-  Serial.println("here1");
   switch (travel_state) {
     case TRAVEL_IDLE:
       // Not navigating
       return true;
 
     case TRAVEL_ROTATING: {
-      Serial.println("here2");
 
       // Calculate angle to target
       float desired_angle = angleToPoint(target_x, target_y);
@@ -1034,7 +1157,6 @@ bool updateTravelToXY() {
     }
 
     case TRAVEL_MOVING:
-      Serial.println("here");
 
       // If not yet started traveling, initialize travel
       if (!traveling) {
@@ -1063,9 +1185,10 @@ void loop() {
   // ============================================
   // CONTINUOUS SYSTEM UPDATES (every iteration)
   // ============================================
-  measureSpeeds();   // Stage 3 – encoder speeds   (20 ms interval)
-  updatePID();       // Stage 4 – closed-loop motor control
-  updatePose();      // Stage 7 – dead-reckoning odometry (20 ms interval)
+  measureSpeeds();      // Stage 3 – encoder speeds   (20 ms interval)
+  updatePID();          // Stage 4 – closed-loop motor control
+  updatePose();         // Stage 7 – dead-reckoning odometry (20 ms interval)
+  readMagnetometer();   // Stage 9 – puck detection   (100 ms interval)
 
   // ============================================
   // STAGE 6: MAIN FINITE STATE MACHINE
