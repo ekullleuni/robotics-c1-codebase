@@ -176,7 +176,7 @@ bool line_sensors_calibrated = false;
 
 // Non-blocking read interval (sensor needs >= 100 ms between reads)
 unsigned long mag_read_ts = 0;
-#define MAG_READ_INTERVAL 100
+#define MAG_READ_INTERVAL 20
 
 // Puck detection threshold on calibrated magnitude.
 // Baseline (Earth field only) reads ~1.0 after calibration.
@@ -187,7 +187,7 @@ unsigned long mag_read_ts = 0;
 //   2. Move puck toward sensor and note the value where
 //      you want detection to trigger
 //   3. Set PUCK_MAGNITUDE_THRESHOLD to that value
-#define PUCK_MAGNITUDE_THRESHOLD 1.5
+#define PUCK_MAGNITUDE_THRESHOLD 1.7
 
 // Latest magnitude reading (updated by readMagnetometer())
 float mag_magnitude = 0.0;
@@ -206,9 +206,16 @@ unsigned long pose_update_ts = 0;
 // Turn behavior variables
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
-#define TURN_THRESHOLD 0.01        // Stop turning when within ±0.05 radians (~2.9°)
-#define TURN_GAIN 5             // Proportional gain for turning (adjust based on testing)
-#define MAX_TURN_SPEED 0.5        // Maximum turn speed (counts/ms) - adjust based on testing
+#define TURN_THRESHOLD 0.01        // Stop turning when within ±0.01 radians (~0.6°)
+#define TURN_GAIN 5                // Proportional gain for turning (adjust based on testing)
+#define MAX_TURN_SPEED 0.5         // Maximum turn speed (counts/ms) - adjust based on testing
+
+// Relative rotation variables (rotate BY an amount, not TO a heading)
+float rotate_target = 0.0;        // Total radians to rotate (positive = CCW)
+float rotate_accumulated = 0.0;   // Radians rotated so far
+float rotate_prev_theta = 0.0;    // Previous theta for tracking deltas
+bool rotating = false;            // Is robot currently doing a relative rotation?
+
 // Travel behavior variables
 float target_x = 0.0;              // Target X coordinate (mm)
 float target_y = 0.0;              // Target Y coordinate (mm)
@@ -235,14 +242,47 @@ TravelState travel_state = TRAVEL_IDLE;
 
 // Robot behaviour states
 enum RobotState {
-  STATE_TRAVEL_TO_WAYPOINT,  // Navigating to the current puck waypoint
-  STATE_AT_WAYPOINT,         // Arrived – brief pause (Stage 9 adds puck check here)
-  STATE_REVERSING,           // Safety: backing up after hitting boundary during travel
-  STATE_TURNING,             // Safety: random turn after reverse, then resumes travel
-  STATE_RETURN_HOME,         // Timer expired: navigating back to start (0,0)
-  STATE_STOPPED              // Arrived home, run complete
+  STATE_TRAVEL_TO_WAYPOINT,       // Navigating to the current puck waypoint
+  STATE_AT_WAYPOINT,              // Arrived – brief pause, check for puck
+  STATE_TRAVERSE_PUCKED_WAYPOINT, // Manoeuvring around detected puck
+  STATE_REVERSING,                // Safety: backing up after hitting boundary during travel
+  STATE_TURNING,                  // Safety: random turn after reverse, then resumes travel
+  STATE_RETURN_HOME,              // Navigating back to start (0,0), pushing puck if present
+  STATE_STOPPED                   // Arrived home, run complete
 };
 RobotState robot_state = STATE_TRAVEL_TO_WAYPOINT;
+
+// ============================================
+// STAGE 10: PUCK TRAVERSE SUB-PHASES
+// ============================================
+// When a puck is detected at a waypoint, the robot reverses,
+// navigates 3 waypoints to get behind the puck (on the
+// puck-to-home line), turns to face home, then pushes.
+enum TraversePhase {
+  TRAVERSE_REVERSE,     // Backing away from detected puck
+  TRAVERSE_WP1,         // Navigating to first bypass waypoint
+  TRAVERSE_WP2,         // Navigating to second bypass waypoint
+  TRAVERSE_WP3,         // Navigating to push position behind puck
+  TRAVERSE_FACE_HOME    // Turning to face (0,0) before push
+};
+TraversePhase traverse_phase;
+
+// The 3 computed bypass/push-position waypoints
+float traverse_wp_x[3];
+float traverse_wp_y[3];
+
+// Lateral/forward offsets for WP1 and WP2 (mm).
+// WP1 = (puck_x - LATERAL, puck_y - FORWARD)
+// WP2 = (puck_x + LATERAL, puck_y - FORWARD)
+// Tune these on the physical robot.
+#define TRAVERSE_LATERAL_OFFSET 50.0
+#define TRAVERSE_FORWARD_OFFSET 50.0
+
+// How far behind the puck (away from home) to place WP3 (mm)
+#define TRAVERSE_BEHIND_DIST 80.0
+
+// How long to reverse before starting the bypass (ms)
+#define TRAVERSE_REVERSE_DURATION 300
 
 // 4-minute countdown timer.
 // Started in setup() AFTER line-sensor calibration so the 3 s
@@ -544,35 +584,52 @@ void calibrateLineSensors() {
 // ============================================
 // STAGE 9: MAGNETOMETER CALIBRATION FUNCTION
 // ============================================
-// Rotates the robot on the spot for ~5 seconds while
-// capturing min/max magnetometer readings on each axis.
-// This MUST run in setup() because it uses delay() and
-// blocks the event loop (same approach as calibrateLineSensors).
+// Rotates the robot exactly 3 full revolutions using
+// setRotation/checkRotation (PID-controlled), collecting
+// magnetometer min/max per axis throughout.  The robot
+// finishes facing the same direction it started (+X).
+//
+// Runs in setup() as a blocking loop that manually pumps
+// the system update functions (speeds, PID, pose).
 //
 // Place the robot on a flat surface AWAY from metal objects
 // (table legs, laptops, phones) before running.
 void calibrateMagnetometer() {
 
   Serial.println("Starting magnetometer calibration...");
-  Serial.println("Robot will rotate for 5 seconds.");
+  Serial.println("Robot will rotate 3 full turns (PID-controlled).");
 
   magnetometer.resetCalibration();
 
-  // Rotate on the spot (slow spin to cover 360+ degrees)
-  motors.setPWM(-30, 30);
+  // Temporarily enable PID for controlled rotation
+  bool pid_was_enabled = use_pid_control;
+  use_pid_control = true;
+  left_pid.reset();
+  right_pid.reset();
 
-  unsigned long cal_start = millis();
-  unsigned long cal_duration = 5000;  // 5 seconds ensures full rotation
+  // 3 full CCW revolutions = 6*PI radians
+  setRotation(3.0 * 2.0 * PI);
 
-  while ( millis() - cal_start < cal_duration ) {
-    // Update calibration with latest reading
-    magnetometer.updateCalibration();
-    // 100 ms between reads to respect sensor timing
-    delay(100);
+  unsigned long last_mag_read = 0;
+
+  // Blocking loop: pump system updates + rotation + mag reads
+  while ( !checkRotation() ) {
+    measureSpeeds();
+    updatePID();
+    updatePose();
+
+    // Read magnetometer every 100 ms (sensor timing limit)
+    if ( millis() - last_mag_read >= 100 ) {
+      magnetometer.updateCalibration();
+      last_mag_read = millis();
+    }
   }
 
-  // Stop motors
-  motors.setPWM(0, 0);
+  // Ensure motors are stopped
+  stopWithPID();
+
+  // Restore previous PID state
+  use_pid_control = pid_was_enabled;
 
   // Compute offset and scaling from captured min/max
   magnetometer.finalizeCalibration();
@@ -1015,6 +1072,76 @@ bool checkTurn() {
 }
 
 // ============================================
+// STAGE 7: RELATIVE ROTATION BEHAVIOR
+// ============================================
+
+/*
+ * Start a rotation BY a given number of radians (relative).
+ * Unlike setTurn() which targets an absolute heading, this
+ * accumulates angular change so it can handle multi-revolution
+ * rotations (e.g. 3 full turns = 6*PI).
+ *
+ * @param radians: Amount to rotate. Positive = CCW, Negative = CW.
+ */
+void setRotation(float radians) {
+  rotate_target = radians;
+  rotate_accumulated = 0.0;
+  rotate_prev_theta = pose.theta;
+  rotating = true;
+}
+
+/*
+ * Non-blocking rotation update function.
+ * Call this repeatedly from loop() while rotating.
+ * Uses the same TURN_GAIN, MAX_TURN_SPEED and TURN_THRESHOLD
+ * as checkTurn() for consistent behaviour.
+ *
+ * @return: true if rotation complete, false if still rotating
+ */
+bool checkRotation() {
+  if (!rotating) return true;
+
+  // Accumulate the small angular change since last call.
+  // angleDiff handles the ±PI wraparound per step so the
+  // running total can exceed 2*PI for multi-revolution spins.
+  float delta = angleDiff(pose.theta, rotate_prev_theta);
+  rotate_accumulated += delta;
+  rotate_prev_theta = pose.theta;
+
+  // How much rotation remains
+  float remaining = rotate_target - rotate_accumulated;
+
+  // Check if rotation is complete
+  if (abs(remaining) < TURN_THRESHOLD) {
+    if (use_pid_control) {
+      setDemandSpeeds(0.0, 0.0);
+      left_pid.reset();
+      right_pid.reset();
+    } else {
+      motors.setPWM(0, 0);
+    }
+    rotating = false;
+    return true;
+  }
+
+  // Proportional speed control on remaining angle
+  float turn_speed = remaining * TURN_GAIN;
+  if (turn_speed > MAX_TURN_SPEED) turn_speed = MAX_TURN_SPEED;
+  if (turn_speed < -MAX_TURN_SPEED) turn_speed = -MAX_TURN_SPEED;
+
+  if (use_pid_control) {
+    setDemandSpeeds(-turn_speed, turn_speed);
+  } else {
+    float turn_pwm = turn_speed;
+    if (turn_pwm > 100) turn_pwm = 100;
+    if (turn_pwm < -100) turn_pwm = -100;
+    motors.setPWM(turn_pwm, -turn_pwm);
+  }
+
+  return false;
+}
+
+// ============================================
 // STAGE 7: TRAVEL BEHAVIOR
 // ============================================
 
@@ -1185,7 +1312,6 @@ void loop() {
   // ============================================
   // CONTINUOUS SYSTEM UPDATES (every iteration)
   // ============================================
-<<<<<<< Updated upstream
   measureSpeeds();      // Stage 3 – encoder speeds   (20 ms interval)
   updatePID();          // Stage 4 – closed-loop motor control
   updatePose();         // Stage 7 – dead-reckoning odometry (20 ms interval)
@@ -1200,9 +1326,6 @@ void loop() {
     // TRAVEL_TO_WAYPOINT – navigate toward the next puck
     // --------------------------------------------------
     case STATE_TRAVEL_TO_WAYPOINT:
-      // Safety: if we hit the map boundary while travelling,
-      // abort the current leg and do a reverse + random turn.
-
       // updateTravelToXY() returns true once the waypoint is reached
       if (updateTravelToXY()) {
         Serial.print("Arrived at wp");
@@ -1214,29 +1337,137 @@ void loop() {
       break;
 
     // --------------------------------------------------
-    // AT_WAYPOINT – short pause (Stage 9 will add puck check)
+    // AT_WAYPOINT – pause, then check for puck
     // --------------------------------------------------
     case STATE_AT_WAYPOINT:
       if (millis() - maneuver_ts >= WAYPOINT_PAUSE_MS) {
-        // Advance to the next waypoint in the visit sequence
-        current_waypoint_idx++;
-        if (current_waypoint_idx >= NUM_WAYPOINTS) {
-          current_waypoint_idx = 0;  // wrap and repeat the circuit
+
+        if (detectPuck()) {
+          // ---- PUCK FOUND: compute traverse waypoints ----
+          float px = waypoint_x[waypoint_order[current_waypoint_idx]];
+          float py = waypoint_y[waypoint_order[current_waypoint_idx]];
+
+          Serial.print("PUCK DETECTED at wp");
+          Serial.println(waypoint_order[current_waypoint_idx] + 1);
+
+          // WP1 & WP2: fixed-offset bypass around the puck
+          traverse_wp_x[0] = px - TRAVERSE_LATERAL_OFFSET;
+          traverse_wp_y[0] = py - TRAVERSE_FORWARD_OFFSET;
+          traverse_wp_x[1] = px + TRAVERSE_LATERAL_OFFSET;
+          traverse_wp_y[1] = py - TRAVERSE_FORWARD_OFFSET;
+
+          // WP3: on the line from (0,0) through the puck,
+          // BEHIND the puck (further from home).
+          // This ensures the robot faces straight through
+          // the puck toward home when it turns around.
+          float dist_to_puck = sqrt(px * px + py * py);
+          float ux = px / dist_to_puck;  // unit vector origin→puck
+          float uy = py / dist_to_puck;
+          traverse_wp_x[2] = px + TRAVERSE_BEHIND_DIST * ux;
+          traverse_wp_y[2] = py + TRAVERSE_BEHIND_DIST * uy;
+
+          Serial.print("  Traverse WP1: (");
+          Serial.print(traverse_wp_x[0], 1);
+          Serial.print(", ");
+          Serial.print(traverse_wp_y[0], 1);
+          Serial.println(")");
+          Serial.print("  Traverse WP2: (");
+          Serial.print(traverse_wp_x[1], 1);
+          Serial.print(", ");
+          Serial.print(traverse_wp_y[1], 1);
+          Serial.println(")");
+          Serial.print("  Traverse WP3 (push pos): (");
+          Serial.print(traverse_wp_x[2], 1);
+          Serial.print(", ");
+          Serial.print(traverse_wp_y[2], 1);
+          Serial.println(")");
+
+          // Start by reversing away from the puck
+          maneuver_ts = millis();
+          setDemandSpeeds(REVERSE_SPEED, REVERSE_SPEED);
+          traverse_phase = TRAVERSE_REVERSE;
+          robot_state = STATE_TRAVERSE_PUCKED_WAYPOINT;
+
+        } else {
+          // ---- NO PUCK: advance to next waypoint ----
+          current_waypoint_idx++;
+          if (current_waypoint_idx >= NUM_WAYPOINTS) {
+            current_waypoint_idx = 0;  // wrap and repeat the circuit
+          }
+
+          travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
+                     waypoint_y[waypoint_order[current_waypoint_idx]]);
+
+          Serial.print("Heading to wp");
+          Serial.print(waypoint_order[current_waypoint_idx] + 1);
+          Serial.print(" (");
+          Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
+          Serial.print(", ");
+          Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
+          Serial.println(")");
+
+          robot_state = STATE_TRAVEL_TO_WAYPOINT;
+        }
+      }
+      break;
+
+    // --------------------------------------------------
+    // TRAVERSE_PUCKED_WAYPOINT – manoeuvre around puck,
+    // position behind it on the puck→home line, then push
+    // --------------------------------------------------
+    case STATE_TRAVERSE_PUCKED_WAYPOINT:
+      switch (traverse_phase) {
+
+        // Phase 1: reverse a short distance from the puck
+        case TRAVERSE_REVERSE:
+          if (millis() - maneuver_ts >= TRAVERSE_REVERSE_DURATION) {
+            stopWithPID();
+            Serial.println("Traverse: reverse done → WP1");
+            travelToXY(traverse_wp_x[0], traverse_wp_y[0]);
+            traverse_phase = TRAVERSE_WP1;
+          }
+          break;
+
+        // Phase 2: travel to first bypass waypoint
+        case TRAVERSE_WP1:
+          if (updateTravelToXY()) {
+            stopWithPID();
+            Serial.println("Traverse: WP1 reached → WP2");
+            travelToXY(traverse_wp_x[1], traverse_wp_y[1]);
+            traverse_phase = TRAVERSE_WP2;
+          }
+          break;
+
+        // Phase 3: travel to second bypass waypoint
+        case TRAVERSE_WP2:
+          if (updateTravelToXY()) {
+            stopWithPID();
+            Serial.println("Traverse: WP2 reached → WP3 (push position)");
+            travelToXY(traverse_wp_x[2], traverse_wp_y[2]);
+            traverse_phase = TRAVERSE_WP3;
+          }
+          break;
+
+        // Phase 4: travel to push position behind puck
+        case TRAVERSE_WP3: {
+          if (updateTravelToXY()) {
+            stopWithPID();
+            Serial.println("Traverse: WP3 reached → turning to face home");
+            float angle_to_home = atan2(0.0 - pose.y, 0.0 - pose.x);
+            setTurn(angle_to_home);
+            traverse_phase = TRAVERSE_FACE_HOME;
+          }
+          break;
         }
 
-        // Kick off navigation to the next waypoint
-        travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
-                   waypoint_y[waypoint_order[current_waypoint_idx]]);
-
-        Serial.print("Heading to wp");
-        Serial.print(waypoint_order[current_waypoint_idx] + 1);
-        Serial.print(" (");
-        Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
-        Serial.print(", ");
-        Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
-        Serial.println(")");
-
-        robot_state = STATE_TRAVEL_TO_WAYPOINT;
+        // Phase 5: turn to face home, then begin push
+        case TRAVERSE_FACE_HOME:
+          if (checkTurn()) {
+            Serial.println("Traverse: facing home → pushing puck to start");
+            travelToXY(0, 0);
+            robot_state = STATE_RETURN_HOME;
+          }
+          break;
       }
       break;
 
@@ -1264,10 +1495,4 @@ void loop() {
   // the following will update the display with
   // the time remaining in seconds.
   //display.timeRemaining();
-=======
-  measureSpeeds();   // Stage 3 – encoder speeds   (20 ms interval)
-  updatePID();       // Stage 4 – closed-loop motor control
-  updatePose();
-
->>>>>>> Stashed changes
 }
