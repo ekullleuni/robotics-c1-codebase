@@ -182,8 +182,8 @@ unsigned long pose_update_ts = 0;
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
 #define TURN_THRESHOLD 0.01        // Stop turning when within ±0.05 radians (~2.9°)
-#define TURN_GAIN 1.5             // Proportional gain for turning (adjust based on testing)
-
+#define TURN_GAIN 5             // Proportional gain for turning (adjust based on testing)
+#define MAX_TURN_SPEED 0.5        // Maximum turn speed (counts/ms) - adjust based on testing
 // Travel behavior variables
 float target_x = 0.0;              // Target X coordinate (mm)
 float target_y = 0.0;              // Target Y coordinate (mm)
@@ -193,7 +193,7 @@ float target_init_dist = 0.0;       // Distance to target (mm)
 bool traveling = false;            // Is robot currently traveling?
 #define TRAVEL_THRESHOLD 10.0      // Stop when within 10mm of target
 #define TRAVEL_SPEED 0.5           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
-#define HEADING_CORRECTION_GAIN 0.001  // Gain for heading correction during travel
+#define HEADING_CORRECTION_GAIN 0.1  // Gain for heading correction during travel
 
 // Combined travelToXY behavior
 enum TravelState {
@@ -653,6 +653,8 @@ void setDemandSpeed(float speed) {
  */
 void stopWithPID() {
   setDemandSpeeds(0.0, 0.0);
+  left_pid.reset();
+  right_pid.reset();
 }
 
 // ============================================
@@ -853,6 +855,8 @@ bool checkTurn() {
     // Stop motors
     if (use_pid_control) {
       setDemandSpeeds(0.0, 0.0);
+      left_pid.reset();
+      right_pid.reset();
     } else {
       motors.setPWM(0, 0);
     }
@@ -861,7 +865,11 @@ bool checkTurn() {
   }
 
   // Calculate turn speed proportional to error
+
   float turn_speed = angle_error * TURN_GAIN;
+  // Constrain turn speed to maximum allowed value
+  if (turn_speed > MAX_TURN_SPEED) turn_speed = MAX_TURN_SPEED;
+  if (turn_speed < -MAX_TURN_SPEED) turn_speed = -MAX_TURN_SPEED;
 
   // Apply turn speeds (opposite directions for rotation on spot)
   if (use_pid_control) {
@@ -920,6 +928,8 @@ bool checkTravel() {
     // Stop motors
     if (use_pid_control) {
       setDemandSpeeds(0.0, 0.0);
+      left_pid.reset();
+      right_pid.reset();
     } else {
       motors.setPWM(0, 0);
     }
@@ -981,6 +991,13 @@ bool checkTravel() {
 void travelToXY(float x, float y) {
   target_x = x;
   target_y = y;
+
+  // Reset PID controllers so that stale ms_last_t from any
+  // preceding idle period does not cause a huge dt (and thus
+  // a massive integral spike) on the first update() call.
+  left_pid.reset();
+  right_pid.reset();
+
   travel_state = TRAVEL_ROTATING;  // Start with rotation phase
 }
 
@@ -1042,10 +1059,85 @@ bool updateTravelToXY() {
 
 // put your main code here, to run repeatedly:
 void loop() {
+
   // ============================================
   // CONTINUOUS SYSTEM UPDATES (every iteration)
   // ============================================
   measureSpeeds();   // Stage 3 – encoder speeds   (20 ms interval)
   updatePID();       // Stage 4 – closed-loop motor control
-  updatePose();
+  updatePose();      // Stage 7 – dead-reckoning odometry (20 ms interval)
+
+  // ============================================
+  // STAGE 6: MAIN FINITE STATE MACHINE
+  // ============================================
+  switch (robot_state) {
+
+    // --------------------------------------------------
+    // TRAVEL_TO_WAYPOINT – navigate toward the next puck
+    // --------------------------------------------------
+    case STATE_TRAVEL_TO_WAYPOINT:
+      // Safety: if we hit the map boundary while travelling,
+      // abort the current leg and do a reverse + random turn.
+
+      // updateTravelToXY() returns true once the waypoint is reached
+      if (updateTravelToXY()) {
+        Serial.print("Arrived at wp");
+        Serial.println(waypoint_order[current_waypoint_idx] + 1);
+        stopWithPID();
+        robot_state  = STATE_AT_WAYPOINT;
+        maneuver_ts  = millis();  // start the pause timer
+      }
+      break;
+
+    // --------------------------------------------------
+    // AT_WAYPOINT – short pause (Stage 9 will add puck check)
+    // --------------------------------------------------
+    case STATE_AT_WAYPOINT:
+      if (millis() - maneuver_ts >= WAYPOINT_PAUSE_MS) {
+        // Advance to the next waypoint in the visit sequence
+        current_waypoint_idx++;
+        if (current_waypoint_idx >= NUM_WAYPOINTS) {
+          current_waypoint_idx = 0;  // wrap and repeat the circuit
+        }
+
+        // Kick off navigation to the next waypoint
+        travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
+                   waypoint_y[waypoint_order[current_waypoint_idx]]);
+
+        Serial.print("Heading to wp");
+        Serial.print(waypoint_order[current_waypoint_idx] + 1);
+        Serial.print(" (");
+        Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
+        Serial.print(", ");
+        Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
+        Serial.println(")");
+
+        robot_state = STATE_TRAVEL_TO_WAYPOINT;
+      }
+      break;
+
+    // --------------------------------------------------
+    // RETURN_HOME – navigate back to start using odometry
+    // --------------------------------------------------
+    case STATE_RETURN_HOME:
+      // updateTravelToXY() returns true once (0,0) is reached
+      if (updateTravelToXY()) {
+        Serial.println("*** Arrived at start. Run complete. ***");
+        stopWithPID();
+        robot_state = STATE_STOPPED;
+      }
+      break;
+
+    // --------------------------------------------------
+    // STOPPED – run is finished, hold motors off
+    // --------------------------------------------------
+    case STATE_STOPPED:
+      stopWithPID();
+      break;
+  }
+
+  // If you are using an OLED or LCD display,
+  // the following will update the display with
+  // the time remaining in seconds.
+  //display.timeRemaining();
 }
