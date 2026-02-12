@@ -1185,6 +1185,7 @@ void loop() {
   // ============================================
   // CONTINUOUS SYSTEM UPDATES (every iteration)
   // ============================================
+<<<<<<< Updated upstream
   measureSpeeds();      // Stage 3 – encoder speeds   (20 ms interval)
   updatePID();          // Stage 4 – closed-loop motor control
   updatePose();         // Stage 7 – dead-reckoning odometry (20 ms interval)
@@ -1263,4 +1264,10 @@ void loop() {
   // the following will update the display with
   // the time remaining in seconds.
   //display.timeRemaining();
+=======
+  measureSpeeds();   // Stage 3 – encoder speeds   (20 ms interval)
+  updatePID();       // Stage 4 – closed-loop motor control
+  updatePose();
+
+>>>>>>> Stashed changes
 }
