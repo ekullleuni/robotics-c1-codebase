@@ -176,7 +176,7 @@ bool line_sensors_calibrated = false;
 
 // Non-blocking read interval (sensor needs >= 100 ms between reads)
 unsigned long mag_read_ts = 0;
-#define MAG_READ_INTERVAL 20
+#define MAG_READ_INTERVAL 100
 
 // Puck detection threshold on calibrated magnitude.
 // Baseline (Earth field only) reads ~1.0 after calibration.
@@ -187,7 +187,7 @@ unsigned long mag_read_ts = 0;
 //   2. Move puck toward sensor and note the value where
 //      you want detection to trigger
 //   3. Set PUCK_MAGNITUDE_THRESHOLD to that value
-#define PUCK_MAGNITUDE_THRESHOLD 1.7
+#define PUCK_MAGNITUDE_THRESHOLD 1.8
 
 // Latest magnitude reading (updated by readMagnetometer())
 float mag_magnitude = 0.0;
@@ -245,8 +245,6 @@ enum RobotState {
   STATE_TRAVEL_TO_WAYPOINT,       // Navigating to the current puck waypoint
   STATE_AT_WAYPOINT,              // Arrived – brief pause, check for puck
   STATE_TRAVERSE_PUCKED_WAYPOINT, // Manoeuvring around detected puck
-  STATE_REVERSING,                // Safety: backing up after hitting boundary during travel
-  STATE_TURNING,                  // Safety: random turn after reverse, then resumes travel
   STATE_RETURN_HOME,              // Navigating back to start (0,0), pushing puck if present
   STATE_STOPPED                   // Arrived home, run complete
 };
@@ -260,29 +258,29 @@ RobotState robot_state = STATE_TRAVEL_TO_WAYPOINT;
 // puck-to-home line), turns to face home, then pushes.
 enum TraversePhase {
   TRAVERSE_REVERSE,     // Backing away from detected puck
-  TRAVERSE_WP1,         // Navigating to first bypass waypoint
-  TRAVERSE_WP2,         // Navigating to second bypass waypoint
-  TRAVERSE_WP3,         // Navigating to push position behind puck
-  TRAVERSE_FACE_HOME    // Turning to face (0,0) before push
+  TRAVERSE_WP1,         // Navigating to bypass waypoint (or direct to push pos)
+  TRAVERSE_WP2          // Navigating to push position behind puck (far quadrant only)
 };
 TraversePhase traverse_phase;
 
-// The 3 computed bypass/push-position waypoints
-float traverse_wp_x[3];
-float traverse_wp_y[3];
+// Whether the push position (rF) is in the "far" quadrant
+// relative to the robot's approach, requiring an extra bypass WP.
+// Set during TRAVERSE_REVERSE, read during TRAVERSE_WP1.
+bool in_far_quadrant = false;
+
+// Computed traverse waypoints (max 2: bypass + push position)
+float traverse_wp_x[2];
+float traverse_wp_y[2];
 
 // Lateral/forward offsets for WP1 and WP2 (mm).
 // WP1 = (puck_x - LATERAL, puck_y - FORWARD)
 // WP2 = (puck_x + LATERAL, puck_y - FORWARD)
 // Tune these on the physical robot.
-#define TRAVERSE_LATERAL_OFFSET 50.0
-#define TRAVERSE_FORWARD_OFFSET 50.0
+#define TRAVERSE_OFFSET 200.0
 
 // How far behind the puck (away from home) to place WP3 (mm)
-#define TRAVERSE_BEHIND_DIST 80.0
 
-// How long to reverse before starting the bypass (ms)
-#define TRAVERSE_REVERSE_DURATION 300
+// (Reverse distance is controlled by REVERSE_DISTANCE above)
 
 // 4-minute countdown timer.
 // Started in setup() AFTER line-sensor calibration so the 3 s
@@ -297,8 +295,12 @@ unsigned long countdown_print_ts = 0;
 unsigned long maneuver_ts = 0;
 
 // --- Reversing parameters ---
-#define REVERSE_DURATION 400    // How long to reverse (ms)
-#define REVERSE_SPEED -0.3      // Reverse speed (counts/ms, negative)
+#define REVERSE_SPEED -0.3        // Reverse speed (counts/ms, negative)
+#define REVERSE_DISTANCE 100.0     // Default reverse distance (mm) - tune on robot
+float reverse_target_dist = 0.0;  // Distance to reverse (mm)
+float reverse_start_x = 0.0;     // Pose X when reverse began
+float reverse_start_y = 0.0;     // Pose Y when reverse began
+bool reversing_dist = false;      // Is a distance-based reverse in progress?
 
 // --- Turning parameters ---
 #define MIN_TURN_DURATION 300   // Shortest possible turn (ms)
@@ -1142,6 +1144,62 @@ bool checkRotation() {
 }
 
 // ============================================
+// STAGE 7: REVERSE BEHAVIOR
+// ============================================
+
+/*
+ * Start a straight-line reverse by a given distance.
+ * Non-blocking: call checkReverse() each loop iteration.
+ * Uses odometry (pose) to measure distance travelled.
+ *
+ * @param distance_mm: How far to reverse (positive value, mm).
+ *                     Defaults to REVERSE_DISTANCE if 0 is passed.
+ */
+void setReverse(float distance_mm) {
+  reverse_target_dist = (distance_mm > 0) ? distance_mm : REVERSE_DISTANCE;
+  reverse_start_x = pose.x;
+  reverse_start_y = pose.y;
+  reversing_dist = true;
+}
+
+/*
+ * Non-blocking reverse update function.
+ * Call this repeatedly from loop() while reversing.
+ *
+ * @return: true if reverse complete, false if still reversing
+ */
+bool checkReverse() {
+  if (!reversing_dist) return true;
+
+  // Calculate distance from starting position
+  float dx = pose.x - reverse_start_x;
+  float dy = pose.y - reverse_start_y;
+  float dist_traveled = sqrt(dx * dx + dy * dy);
+
+  // Check if target distance reached
+  if (dist_traveled >= reverse_target_dist) {
+    if (use_pid_control) {
+      setDemandSpeeds(0.0, 0.0);
+      left_pid.reset();
+      right_pid.reset();
+    } else {
+      motors.setPWM(0, 0);
+    }
+    reversing_dist = false;
+    return true;
+  }
+
+  // Drive backward at constant reverse speed
+  if (use_pid_control) {
+    setDemandSpeeds(REVERSE_SPEED, REVERSE_SPEED);
+  } else {
+    motors.setPWM(-30, -30);
+  }
+
+  return false;
+}
+
+// ============================================
 // STAGE 7: TRAVEL BEHAVIOR
 // ============================================
 
@@ -1318,6 +1376,20 @@ void loop() {
   readMagnetometer();   // Stage 9 – puck detection   (100 ms interval)
 
   // ============================================
+  // STAGE 6: 4-MINUTE TIMER CHECK
+  // ============================================
+  // If time is up and we're not already heading home or stopped,
+  // abandon current task and return to start immediately.
+  if ( robot_state != STATE_RETURN_HOME &&
+       robot_state != STATE_STOPPED &&
+       millis() - timer_start_ms >= TIMER_DURATION_MS ) {
+    Serial.println("*** 4-MINUTE TIMER EXPIRED — returning home ***");
+    stopWithPID();
+    travelToXY(0, 0);
+    robot_state = STATE_RETURN_HOME;
+  }
+
+  // ============================================
   // STAGE 6: MAIN FINITE STATE MACHINE
   // ============================================
   switch (robot_state) {
@@ -1326,13 +1398,22 @@ void loop() {
     // TRAVEL_TO_WAYPOINT – navigate toward the next puck
     // --------------------------------------------------
     case STATE_TRAVEL_TO_WAYPOINT:
-      // updateTravelToXY() returns true once the waypoint is reached
-      if (updateTravelToXY()) {
-        Serial.print("Arrived at wp");
-        Serial.println(waypoint_order[current_waypoint_idx] + 1);
-        stopWithPID();
-        robot_state  = STATE_AT_WAYPOINT;
-        maneuver_ts  = millis();  // start the pause timer
+      if (detectPuck()) {
+        // ---- PUCK FOUND: compute traverse waypoints ----
+        // Start by reversing away from the puck
+        setReverse(REVERSE_DISTANCE);
+        traverse_phase = TRAVERSE_REVERSE;
+        robot_state = STATE_TRAVERSE_PUCKED_WAYPOINT;
+
+      } else {
+        // updateTravelToXY() returns true once the waypoint is reached
+        if (updateTravelToXY()) {
+          Serial.print("Arrived at wp");
+          Serial.println(waypoint_order[current_waypoint_idx] + 1);
+          stopWithPID();
+          robot_state  = STATE_AT_WAYPOINT;
+          maneuver_ts  = millis();  // start the pause timer
+        }
       }
       break;
 
@@ -1344,47 +1425,8 @@ void loop() {
 
         if (detectPuck()) {
           // ---- PUCK FOUND: compute traverse waypoints ----
-          float px = waypoint_x[waypoint_order[current_waypoint_idx]];
-          float py = waypoint_y[waypoint_order[current_waypoint_idx]];
-
-          Serial.print("PUCK DETECTED at wp");
-          Serial.println(waypoint_order[current_waypoint_idx] + 1);
-
-          // WP1 & WP2: fixed-offset bypass around the puck
-          traverse_wp_x[0] = px - TRAVERSE_LATERAL_OFFSET;
-          traverse_wp_y[0] = py - TRAVERSE_FORWARD_OFFSET;
-          traverse_wp_x[1] = px + TRAVERSE_LATERAL_OFFSET;
-          traverse_wp_y[1] = py - TRAVERSE_FORWARD_OFFSET;
-
-          // WP3: on the line from (0,0) through the puck,
-          // BEHIND the puck (further from home).
-          // This ensures the robot faces straight through
-          // the puck toward home when it turns around.
-          float dist_to_puck = sqrt(px * px + py * py);
-          float ux = px / dist_to_puck;  // unit vector origin→puck
-          float uy = py / dist_to_puck;
-          traverse_wp_x[2] = px + TRAVERSE_BEHIND_DIST * ux;
-          traverse_wp_y[2] = py + TRAVERSE_BEHIND_DIST * uy;
-
-          Serial.print("  Traverse WP1: (");
-          Serial.print(traverse_wp_x[0], 1);
-          Serial.print(", ");
-          Serial.print(traverse_wp_y[0], 1);
-          Serial.println(")");
-          Serial.print("  Traverse WP2: (");
-          Serial.print(traverse_wp_x[1], 1);
-          Serial.print(", ");
-          Serial.print(traverse_wp_y[1], 1);
-          Serial.println(")");
-          Serial.print("  Traverse WP3 (push pos): (");
-          Serial.print(traverse_wp_x[2], 1);
-          Serial.print(", ");
-          Serial.print(traverse_wp_y[2], 1);
-          Serial.println(")");
-
           // Start by reversing away from the puck
-          maneuver_ts = millis();
-          setDemandSpeeds(REVERSE_SPEED, REVERSE_SPEED);
+          setReverse(REVERSE_DISTANCE);
           traverse_phase = TRAVERSE_REVERSE;
           robot_state = STATE_TRAVERSE_PUCKED_WAYPOINT;
 
@@ -1418,11 +1460,70 @@ void loop() {
     case STATE_TRAVERSE_PUCKED_WAYPOINT:
       switch (traverse_phase) {
 
-        // Phase 1: reverse a short distance from the puck
+        // Phase 1: reverse a fixed distance from the puck
         case TRAVERSE_REVERSE:
-          if (millis() - maneuver_ts >= TRAVERSE_REVERSE_DURATION) {
-            stopWithPID();
+          if (checkReverse()) {
             Serial.println("Traverse: reverse done → WP1");
+            float px = waypoint_x[waypoint_order[current_waypoint_idx]];
+            float py = waypoint_y[waypoint_order[current_waypoint_idx]];
+
+            Serial.print("PUCK DETECTED at wp");
+            Serial.println(waypoint_order[current_waypoint_idx] + 1);
+            
+            // --- Compute push position (rF) behind puck on the home→puck line ---
+            // m1 = unit vector from origin (home) toward puck
+            float m1_dist = sqrt(px * px + py * py);
+            float m1_x = px / m1_dist;
+            float m1_y = py / m1_dist;
+            // rF sits TRAVERSE_OFFSET mm beyond the puck, along the home→puck line
+            float rf_x = px + m1_x * TRAVERSE_OFFSET;
+            float rf_y = py + m1_y * TRAVERSE_OFFSET;
+
+            // --- Decide whether rF is reachable directly or needs a bypass ---
+            // m2 = unit vector from robot toward puck
+            float dx_rp = px - pose.x;
+            float dy_rp = py - pose.y;
+            float rp_dist = sqrt(dx_rp * dx_rp + dy_rp * dy_rp);
+            float m2_x = dx_rp / rp_dist;
+            float m2_y = dy_rp / rp_dist;
+
+            // Compare the angle of the home→puck line with the robot→puck line.
+            // If the angular difference is large (> PI), rF is roughly "behind"
+            // the robot so it can drive there directly.  Otherwise it must
+            // swing around the puck via a perpendicular bypass waypoint.
+            float rf_angle = atan2(m1_y, m1_x);
+            float rp_angle = atan2(m2_y, m2_x);
+            float ang_diff = angleDiff(rp_angle, rf_angle);
+
+            if (fabs(ang_diff) >= PI / 2.0) {
+              // rF is roughly accessible — drive straight there
+              traverse_wp_x[0] = rf_x;
+              traverse_wp_y[0] = rf_y;
+              in_far_quadrant = false;
+            } else {
+              // rF is on the far side — first swing perpendicular to
+              // the robot→puck line to avoid pushing the puck off course.
+              // Perpendicular of m2 = (-m2_y, m2_x); choose the side
+              // that moves toward the push line (sign of ang_diff).
+              float perp_x, perp_y;
+              if (ang_diff > 0) {
+                // Swing left of the robot→puck line
+                perp_x = m2_y;
+                perp_y = -m2_x;
+              } else {
+                // Swing right of the robot→puck line
+                perp_x = -m2_y;
+                perp_y = m2_x;
+              }
+              // Bypass WP: offset perpendicular from the puck position
+              traverse_wp_x[0] = px + perp_x * TRAVERSE_OFFSET;
+              traverse_wp_y[0] = py + perp_y * TRAVERSE_OFFSET;
+
+              // Then proceed to push position behind puck
+              traverse_wp_x[1] = rf_x;
+              traverse_wp_y[1] = rf_y;
+              in_far_quadrant = true;
+            }
             travelToXY(traverse_wp_x[0], traverse_wp_y[0]);
             traverse_phase = TRAVERSE_WP1;
           }
@@ -1432,9 +1533,15 @@ void loop() {
         case TRAVERSE_WP1:
           if (updateTravelToXY()) {
             stopWithPID();
+            
             Serial.println("Traverse: WP1 reached → WP2");
-            travelToXY(traverse_wp_x[1], traverse_wp_y[1]);
-            traverse_phase = TRAVERSE_WP2;
+            if (in_far_quadrant) {
+              travelToXY(traverse_wp_x[1], traverse_wp_y[1]);
+              traverse_phase = TRAVERSE_WP2;
+            } else {
+              travelToXY(0, 0);
+              robot_state = STATE_RETURN_HOME;
+            }
           }
           break;
 
@@ -1443,31 +1550,11 @@ void loop() {
           if (updateTravelToXY()) {
             stopWithPID();
             Serial.println("Traverse: WP2 reached → WP3 (push position)");
-            travelToXY(traverse_wp_x[2], traverse_wp_y[2]);
-            traverse_phase = TRAVERSE_WP3;
-          }
-          break;
-
-        // Phase 4: travel to push position behind puck
-        case TRAVERSE_WP3: {
-          if (updateTravelToXY()) {
-            stopWithPID();
-            Serial.println("Traverse: WP3 reached → turning to face home");
-            float angle_to_home = atan2(0.0 - pose.y, 0.0 - pose.x);
-            setTurn(angle_to_home);
-            traverse_phase = TRAVERSE_FACE_HOME;
-          }
-          break;
-        }
-
-        // Phase 5: turn to face home, then begin push
-        case TRAVERSE_FACE_HOME:
-          if (checkTurn()) {
-            Serial.println("Traverse: facing home → pushing puck to start");
             travelToXY(0, 0);
             robot_state = STATE_RETURN_HOME;
           }
           break;
+
       }
       break;
 
@@ -1477,9 +1564,24 @@ void loop() {
     case STATE_RETURN_HOME:
       // updateTravelToXY() returns true once (0,0) is reached
       if (updateTravelToXY()) {
-        Serial.println("*** Arrived at start. Run complete. ***");
+        Serial.println("*** Arrived at start — puck delivered ***");
         stopWithPID();
-        robot_state = STATE_STOPPED;
+
+        // If time remains, advance to the next waypoint and keep searching
+        if ( millis() - timer_start_ms < TIMER_DURATION_MS ) {
+          current_waypoint_idx++;
+          if (current_waypoint_idx >= NUM_WAYPOINTS) {
+            current_waypoint_idx = 0;  // wrap around for another sweep
+          }
+          Serial.print("Resuming search → wp");
+          Serial.println(waypoint_order[current_waypoint_idx] + 1);
+          travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
+                     waypoint_y[waypoint_order[current_waypoint_idx]]);
+          robot_state = STATE_TRAVEL_TO_WAYPOINT;
+        } else {
+          // Timer expired while returning — stay at home
+          robot_state = STATE_STOPPED;
+        }
       }
       break;
 
