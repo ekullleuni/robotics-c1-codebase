@@ -27,7 +27,7 @@ extern volatile long count_e1;
 // performance. (see Labsheet 4)
 const float count_per_rev = 358.3;   // From documentation - correct.
 const float wheel_radius  = 16.4;    // mm, could vary - calibrate.
-const float wheel_sep     = 41.8;    // mm, from centre of robot to wheel centre 
+const float wheel_sep     = 42.7;    // mm, from centre of robot to wheel centre 
                                      //     - could vary, calibrate
 
 // Take the circumference of the wheel and divide by the 
