@@ -1,1621 +1,1173 @@
-/******************************************
-  12345
-	______      _           _   _              
-	| ___ \    | |         | | (_)             
-	| |_/ /___ | |__   ___ | |_ _  ___ ___     
-	|    // _ \| '_ \ / _ \| __| |/ __/ __|    
-	| |\ \ (_) | |_) | (_) | |_| | (__\__ \    
-	\_| \_\___/|_.__/ \___/ \__|_|\___|___/    
-											   
-											   
-	 _____      _                              
-	/  ___|    (_)                       ___   
-	\ `--.  ___ _  ___ _ __   ___ ___   ( _ )  
-	 `--. \/ __| |/ _ \ '_ \ / __/ _ \  / _ \/\
-	/\__/ / (__| |  __/ | | | (_|  __/ | (_>  <
-	\____/ \___|_|\___|_| |_|\___\___|  \___/\/
-											   
-											   
-	 _____           _                         
-	/  ___|         | |                        
-	\ `--. _   _ ___| |_ ___ _ __ ___  ___     
-	 `--. \ | | / __| __/ _ \ '_ ` _ \/ __|    
-	/\__/ / |_| \__ \ ||  __/ | | | | \__ \    
-	\____/ \__, |___/\__\___|_| |_| |_|___/    
-			__/ |                              
-		   |___/                               
+/*******************************************
+ *  TUNING SKETCH — Pololu 3Pi+ 32U4
+ *
+ *  Set TUNE_LAYER below to the layer you
+ *  want to calibrate, then upload.
+ *
+ *  Tune in order:  1 → 3 → 0 → 4 → 5
+ *******************************************/
 
+#include "Motors.h"
+#include "PID.h"
+#include "Kinematics.h"
+#include "Encoders.h"
+#include <math.h>
 
- SEMTM0042/43: University of Bristol.
- https://github.com/paulodowd/SEMTM0042_43
-*******************************************/
+// =============================================
+// TUNING MODE SELECTOR
+// Change this value, recompile, and upload.
+//   1 = Motor dead-band measurement
+//   3 = PID speed-controller gains
+//   0 = Kinematics (wheel_radius, wheel_sep)
+//   4 = Navigation primitives (turn, travel)
+//   5 = Composite navigation (travelToXY, endurance)
+// =============================================
+#define TUNE_LAYER 1
 
-
-// These #include commands essentially "copy and paste" 
-// the above .h files (tabs above) into your code here.
-
-// Labsheet 1: Build a class to operate your motors.
-#include "Motors.h"         
-
-// Labsheet 1: Tune PID to control wheel speed.
-#include "PID.h"            
-
-// Labsheet 2: Build a class to read the line sensors.
-#include "LineSensors.h"    
-
-// Labsheet 2: Operate the magnetometer to detect the 
-//             puck.  You will need to follow the steps
-//             to install the software library.
-#include "Magnetometer.h" // Labsheet 2
-
-// Labsheet 3: Calibrate and use kinematics to allow 
-//             your robot to turn and travel between
-//             locations.
-#include "Kinematics.h"  
-
-// Encoders.h does not need modifying.
-#include "Encoders.h"     // For encoder counts
-
-
-// If you want to use one of the Display modules for
-// your robot, please read Supplementary Labsheet 4.
-// You can only use one of the following.  Uncomment
-// the correct one for your display module.  If you
-// have not followed Supplementary Labsheet 4, these 
-// will cause a compile error in your code.  
-
-// Uncomment the next two lines if you will use
-// the GREEN display with 2 rows of pins.
-//#include "lcd.h"
-//LCD_c display(0, 1, 14, 17, 13, 30);
-
-// Uncomment the next two lines if you will use
-// the BLUE display with 1 row of pins.
-//#include "oled.h"
-//OLED_c display(1, 30, 0, 17, 13);
-
-
-// Used for Labsheet 0. Defines which pin the buzzer
-// is attached to. #define works like a
-// find-and-replace through your code.
-// See Labsheet 0.
-#define BUZZER_PIN 6
-
-// Button A pin on Pololu 3Pi+ 32U4
-// Button is active-low (pressed = LOW)
+// =============================================
+// HARDWARE
+// =============================================
+#define BUZZER_PIN    6
 #define BUTTON_A_PIN 14
 
-// Instance of a class to operate motors.
-// A class is like a template, and we name
-// an "instance" to use.
-// You can recognise a class type in the
-// code by the convention of "_c"
-// You will need to complete the class.
-// See Labsheet 1.
-Motors_c motors;    
-
-// Instance of a class to operate the line
-// sensors to measure the surface reflectance.
-// You will need to complete the class.
-// See Labsheet 2.
-LineSensors_c line_sensors; 
-
-// Instance of a class to operate the magnetometer.
-// Completing the class is a later exercise in 
-// Labsheet 2, so you can leave this commented
-// out.
-// See Labsheet 2.
-Magnetometer_c magnetometer;
-
-// Instance of a class to estimate the pose
-// of the robot.  You will need to calibrate
-// this, and potentially improve it.
-// See Labsheet 3.
+// =============================================
+// CLASS INSTANCES
+// =============================================
+Motors_c    motors;
 Kinematics_c pose;
+PID_c      left_pid;
+PID_c      right_pid;
 
-// ============================================
-// STAGE 4: PID Speed Controllers
-// ============================================
-// Two PID controllers - one for each motor
-// These will maintain constant wheel speeds by
-// automatically adjusting PWM output
-PID_c left_pid;   // PID controller for left motor
-PID_c right_pid;  // PID controller for right motor
+// =============================================
+// SPEED MEASUREMENT
+// =============================================
+unsigned long speed_ts = 0;
+#define SPEED_INTERVAL 5          // ms
+long prev_e0 = 0, prev_e1 = 0;
+float speed_e0 = 0.0;            // RIGHT wheel (counts/ms)
+float speed_e1 = 0.0;            // LEFT  wheel (counts/ms)
 
-// ============================================
-// STAGE 3: ENCODER READING & SPEED MEASUREMENT VARIABLES
-// ============================================
+// =============================================
+// PID CONTROL
+// =============================================
+unsigned long pid_ts = 0;
+#define PID_INTERVAL 5            // ms
+float demand_left  = 0.0;
+float demand_right = 0.0;
+bool  use_pid = false;
+float pwm_left  = 0.0;
+float pwm_right = 0.0;
 
-// Speed measurement timing
-unsigned long speed_measurement_ts = 0;
-#define SPEED_MEASUREMENT_INTERVAL 5  // Measure speed every 5ms
+// =============================================
+// PID GAINS — edit these during Layer 3 tuning
+// =============================================
+#define TUNE_KP 40.0
+#define TUNE_KI  0.8
+#define TUNE_KD  0.0
 
-// Previous encoder counts (for calculating change over time)
-long prev_count_e0 = 0;
-long prev_count_e1 = 0;
+// =============================================
+// POSE UPDATE
+// =============================================
+unsigned long pose_ts = 0;
+#define POSE_INTERVAL 5           // ms
 
-// Calculated wheel speeds (in encoder counts per millisecond)
-// NOTE: From Encoders.h, e0 = RIGHT wheel, e1 = LEFT wheel
-float speed_e0 = 0.0;  // RIGHT wheel speed (encoder 0)
-float speed_e1 = 0.0;  // LEFT wheel speed (encoder 1)
+// =============================================
+// NAVIGATION PARAMETERS — edit during Layer 4
+// =============================================
+#define TURN_THRESHOLD        0.01   // rad — stop turning when error < this
+#define TURN_GAIN             5.0    // proportional gain for turn controller
+#define MAX_TURN_SPEED        0.5    // counts/ms — cap
+#define MIN_TURN_SPEED        0.15   // counts/ms — floor (dead-band)
 
-// ============================================
-// STAGE 4: PID CONTROL VARIABLES
-// ============================================
+#define TRAVEL_THRESHOLD     10.0    // mm — arrival radius
+#define TRAVEL_SPEED          0.5    // counts/ms — base forward speed
+#define HEADING_CORR_GAIN     0.1    // heading correction during travel
+#define TRAVEL_DECEL_DIST    50.0    // mm — start decelerating
+#define MIN_TRAVEL_SPEED      0.15   // counts/ms — floor
 
-// PID update timing
-unsigned long pid_update_ts = 0;
-#define PID_UPDATE_INTERVAL 5  // Update PID every 5ms
+#define SETTLE_TIME_MS       50
+#define SETTLE_SPEED_THRESH   0.02   // counts/ms — "stopped"
 
-// Speed demands (in counts per millisecond)
-float demand_speed_left = 0.0;
-float demand_speed_right = 0.0;
+// =============================================
+// NAVIGATION STATE
+// =============================================
+float  nav_target_angle = 0.0;
+bool   nav_turning = false;
 
-// PID enable flag
-bool use_pid_control = false;  // Start with PID disabled for safety
+float  rot_target = 0.0;
+float  rot_accumulated = 0.0;
+float  rot_prev_theta = 0.0;
+bool   nav_rotating = false;
 
-// PID output values (PWM signals calculated by PID)
-float left_pwm_output = 0.0;
-float right_pwm_output = 0.0;
+float  nav_target_x = 0.0, nav_target_y = 0.0;
+float  nav_init_x = 0.0,   nav_init_y = 0.0;
+float  nav_init_dist = 0.0;
+bool   nav_traveling = false;
 
-// ============================================
-// STAGE 5: LINE SENSOR VARIABLES
-// ============================================
-
-// Threshold for detecting black line (0.0 = white, 1.0 = black)
-// After calibration, readings above this threshold indicate black line
-// Start with 0.5 (midpoint), adjust based on testing
-#define LINE_THRESHOLD 0.7
-
-// Flag to indicate if line sensors have been calibrated
-bool line_sensors_calibrated = false;
-
-// ============================================
-// STAGE 9: MAGNETOMETER VARIABLES
-// ============================================
-
-// Non-blocking read interval (sensor needs >= 100 ms between reads)
-unsigned long mag_read_ts = 0;
-#define MAG_READ_INTERVAL 100
-
-// Puck detection threshold on calibrated magnitude.
-// Baseline (Earth field only) reads ~1.0 after calibration.
-// A magnetic puck within ~80 mm raises the magnitude.
-//
-// HUMAN CALIBRATION REQUIRED:
-//   1. With no puck: confirm magnitude prints ~1.0
-//   2. Move puck toward sensor and note the value where
-//      you want detection to trigger
-//   3. Set PUCK_MAGNITUDE_THRESHOLD to that value
-#define PUCK_MAGNITUDE_THRESHOLD 1.8
-
-// Latest magnitude reading (updated by readMagnetometer())
-float mag_magnitude = 0.0;
-
-// Whether magnetometer initialised successfully
-bool mag_ok = false;
-
-// ============================================
-// STAGE 7: KINEMATICS & NAVIGATION VARIABLES
-// ============================================
-
-// Pose update timing (should match speed measurement interval)
-unsigned long pose_update_ts = 0;
-#define POSE_UPDATE_INTERVAL 5  // Update pose every 5ms (matches speed measurement interval)
-
-// Turn behavior variables
-float target_angle = 0.0;         // Target orientation (radians)
-bool turning = false;              // Is robot currently turning?
-#define TURN_THRESHOLD 0.01        // Stop turning when within ±0.01 radians (~0.6°)
-#define TURN_GAIN 5.0              // Proportional gain for turning — gives smooth deceleration
-                                   // over ~0.1 rad (5.7°) before stopping. Old value of 100
-                                   // caused bang-bang: full speed until threshold then instant stop.
-#define MAX_TURN_SPEED 0.5         // Maximum turn speed (counts/ms) - adjust based on testing
-#define MIN_TURN_SPEED 0.15        // Minimum turn speed to overcome motor dead-band (~PWM 15)
-
-// Relative rotation variables (rotate BY an amount, not TO a heading)
-float rotate_target = 0.0;        // Total radians to rotate (positive = CCW)
-float rotate_accumulated = 0.0;   // Radians rotated so far
-float rotate_prev_theta = 0.0;    // Previous theta for tracking deltas
-bool rotating = false;            // Is robot currently doing a relative rotation?
-
-// Travel behavior variables
-float target_x = 0.0;              // Target X coordinate (mm)
-float target_y = 0.0;              // Target Y coordinate (mm)
-float init_x = 0.0;                // Starting X coordinate for travel (mm)
-float init_y = 0.0;                // Starting Y coordinate for travel (mm)
-float target_init_dist = 0.0;       // Distance to target (mm)
-bool traveling = false;            // Is robot currently traveling?
-#define TRAVEL_THRESHOLD 10.0      // Stop when within 10mm of target
-#define TRAVEL_SPEED 0.5           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
-#define HEADING_CORRECTION_GAIN 0.1  // Gain for heading correction during travel
-#define TRAVEL_DECEL_DISTANCE 50.0 // Start decelerating within 50mm of target (mm)
-#define MIN_TRAVEL_SPEED 0.15      // Minimum forward speed to overcome motor dead-band
-
-// Combined travelToXY behavior
 enum TravelState {
-  TRAVEL_IDLE,       // Not traveling
-  TRAVEL_SETTLING,   // Waiting for motors to stop before next phase
-  TRAVEL_ROTATING,   // Initial rotation to face target
-  TRAVEL_MOVING,     // Moving toward target
-  TRAVEL_COMPLETE    // Reached target
+  TS_IDLE, TS_SETTLING, TS_ROTATING, TS_MOVING, TS_COMPLETE
 };
-TravelState travel_state = TRAVEL_IDLE;
+TravelState ts_state = TS_IDLE;
+unsigned long settle_start = 0;
+TravelState settle_next = TS_ROTATING;
 
-// Settling: wait for motors to physically stop between movement phases
-#define SETTLE_TIME_MS 50            // Minimum settling wait (ms)
-#define SETTLE_SPEED_THRESHOLD 0.02  // Speed below this = stopped (counts/ms)
-unsigned long settle_start_ms = 0;
-TravelState settle_next_state = TRAVEL_ROTATING;  // State to enter after settling
+// =============================================
+// TUNING STATES — LAYER 1 (dead-band)
+// =============================================
+enum L1 { L1_IDLE, L1_RAMP, L1_PAUSE, L1_DONE };
+L1  l1 = L1_IDLE;
+int l1_phase = 0;          // 0=LF 1=LR 2=RF 3=RR
+int l1_pwm   = 0;
+unsigned long l1_ts = 0;
+long l1_snap0 = 0, l1_snap1 = 0;
 
-// ============================================
-// STAGE 6: FSM STATES & TIMER
-// ============================================
+// =============================================
+// TUNING STATES — LAYER 3 (PID)
+// =============================================
+enum L3 { L3_IDLE, L3_RUN, L3_COAST, L3_DONE };
+L3  l3 = L3_IDLE;
+int l3_phase = 0;           // 0=medium 1=low 2=reverse
+unsigned long l3_ts = 0;
+unsigned long l3_print_ts = 0;
+float l3_demands[] = { 0.5, 0.15, -0.3 };
+unsigned long l3_durations[] = { 5000, 5000, 3000 };
 
-// Robot behaviour states
-enum RobotState {
-  STATE_TRAVEL_TO_WAYPOINT,       // Navigating to the current puck waypoint
-  STATE_AT_WAYPOINT,              // Arrived – brief pause, check for puck
-  STATE_TRAVERSE_PUCKED_WAYPOINT, // Manoeuvring around detected puck
-  STATE_RETURN_HOME,              // Navigating back to start (0,0), pushing puck if present
-  STATE_STOPPED                   // Arrived home, run complete
+// =============================================
+// TUNING STATES — LAYER 0 (kinematics)
+// =============================================
+enum L0 {
+  L0_IDLE,
+  L0_LIN_RUN, L0_LIN_DONE,
+  L0_ROT_WAIT, L0_ROT_RUN, L0_ROT_DONE,
+  L0_SQ_WAIT, L0_SQ_RUN, L0_SQ_DONE,
+  L0_DONE
 };
-RobotState robot_state = STATE_TRAVEL_TO_WAYPOINT;
+L0 l0 = L0_IDLE;
+long l0_start_e0 = 0, l0_start_e1 = 0;
+#define L0_LINEAR_TARGET_COUNTS 1000   // ~288 mm
+int  l0_sq_leg = 0;
+bool l0_sq_started = false;
+float l0_sq_x[] = { 200, 200,   0,  0 };
+float l0_sq_y[] = {   0,-200,-200,  0 };
 
-// ============================================
-// STAGE 10: PUCK TRAVERSE SUB-PHASES
-// ============================================
-// When a puck is detected at a waypoint, the robot reverses,
-// navigates 3 waypoints to get behind the puck (on the
-// puck-to-home line), turns to face home, then pushes.
-enum TraversePhase {
-  TRAVERSE_REVERSE,     // Backing away from detected puck
-  TRAVERSE_WP1,         // Navigating to bypass waypoint (or direct to push pos)
-  TRAVERSE_WP2          // Navigating to push position behind puck (far quadrant only)
+// =============================================
+// TUNING STATES — LAYER 4 (navigation)
+// =============================================
+enum L4 {
+  L4_IDLE,
+  L4_TURN_RUN, L4_TURN_DONE,
+  L4_TRAV_WAIT, L4_TRAV_RUN, L4_TRAV_DONE,
+  L4_SQ_WAIT, L4_SQ_RUN, L4_SQ_DONE,
+  L4_DONE
 };
-TraversePhase traverse_phase;
+L4   l4 = L4_IDLE;
+int  l4_step = 0;
+bool l4_started = false;
+float l4_turns[] = { PI/2.0, PI, -PI/2.0, 0.0 };
+#define L4_NUM_TURNS 4
+float l4_trav_x[] = { 300,   0 };
+float l4_trav_y[] = {   0,   0 };
+#define L4_NUM_TRAVS 2
+int  l4_sq_leg = 0;
+bool l4_sq_started = false;
 
-// Whether the push position (rF) is in the "far" quadrant
-// relative to the robot's approach, requiring an extra bypass WP.
-// Set during TRAVERSE_REVERSE, read during TRAVERSE_WP1.
-bool in_far_quadrant = false;
+// =============================================
+// TUNING STATES — LAYER 5 (composite)
+// =============================================
+enum L5 {
+  L5_IDLE,
+  L5_CIRCUIT, L5_CIRCUIT_DONE,
+  L5_ENDURANCE_WAIT, L5_ENDURANCE, L5_ENDURANCE_DONE,
+  L5_DONE
+};
+L5   l5 = L5_IDLE;
+int  l5_wp = 0;
+bool l5_started = false;
+unsigned long l5_start_ms = 0;
+unsigned long l5_print_ts = 0;
+int  l5_lap = 0;
+#define L5_NUM_WP 6
+float l5_x[] = {  60.6, 260.7, 429.0, 408.8, 354.3, 156.7 };
+float l5_y[] = { 262.9, 211.4, 267.7, 113.9, -10.9,  83.9 };
+#define L5_ENDURANCE_MS 240000UL   // 4 minutes
 
-// Computed traverse waypoints (max 2: bypass + push position)
-float traverse_wp_x[2];
-float traverse_wp_y[2];
+// =============================================
+// BUTTON HELPER (blocking debounce — only
+// call when robot is stationary)
+// =============================================
+bool waitButton() {
+  if (digitalRead(BUTTON_A_PIN) == LOW) {
+    delay(50);
+    while (digitalRead(BUTTON_A_PIN) == LOW) {}
+    delay(50);
+    return true;
+  }
+  return false;
+}
 
-// Lateral/forward offsets for WP1 and WP2 (mm).
-// WP1 = (puck_x - LATERAL, puck_y - FORWARD)
-// WP2 = (puck_x + LATERAL, puck_y - FORWARD)
-// Tune these on the physical robot.
-#define TRAVERSE_OFFSET 200.0
-
-// How far behind the puck (away from home) to place WP3 (mm)
-
-// (Reverse distance is controlled by REVERSE_DISTANCE above)
-
-// 4-minute countdown timer.
-// Started in setup() AFTER line-sensor calibration so the 3 s
-// calibration spin does not eat into the 4-minute run.
-#define TIMER_DURATION_MS 240000UL   // 4 minutes in ms
-unsigned long timer_start_ms = 0;    // Set in setup()
-
-// Serial countdown print (updates once per second)
-unsigned long countdown_print_ts = 0;
-
-// Shared timestamp for timed manoeuvres (reverse / turn)
-unsigned long maneuver_ts = 0;
-
-// --- Reversing parameters ---
-#define REVERSE_SPEED -0.3        // Reverse speed (counts/ms, negative)
-#define REVERSE_DISTANCE 100.0     // Default reverse distance (mm) - tune on robot
-float reverse_target_dist = 0.0;  // Distance to reverse (mm)
-float reverse_start_x = 0.0;     // Pose X when reverse began
-float reverse_start_y = 0.0;     // Pose Y when reverse began
-bool reversing_dist = false;      // Is a distance-based reverse in progress?
-
-// --- Turning parameters ---
-#define MIN_TURN_DURATION 300   // Shortest possible turn (ms)
-#define MAX_TURN_DURATION 1000  // Longest  possible turn (ms)
-#define TURN_SPEED 0.4          // Wheel speed during turn (counts/ms)
-unsigned long turn_duration = 0;  // Chosen randomly each turn
-int turn_direction = 1;           // +1 = left, -1 = right
-
-// ============================================
-// STAGE 8: WAYPOINT NAVIGATION
-// ============================================
-// Number of puck locations extracted from Map.svg
-#define NUM_WAYPOINTS 6
-
-// Puck locations in the robot coordinate frame (mm).
-// Origin = start-area centre; robot faces +X at launch.
-// Coordinates extracted from Map.svg by chaining nested
-// group translate() transforms.
-float waypoint_x[NUM_WAYPOINTS] = {  60.6, 260.7, 429.0, 408.8, 354.3, 156.7 };
-float waypoint_y[NUM_WAYPOINTS] = { 262.9, 211.4, 267.7, 113.9, -10.9,  83.9 };
-
-// Visit order: indices into waypoint arrays.
-// Sweep order roughly minimises total travel distance.
-int waypoint_order[NUM_WAYPOINTS] = { 0, 1, 2, 3, 4, 5 };
-
-// Index into waypoint_order for the waypoint currently being visited
-int current_waypoint_idx = 0;
-
-// How long (ms) to pause at each waypoint before moving on.
-// Leaves time for future puck-detection (Stage 9).
-#define WAYPOINT_PAUSE_MS 1000
-
-// The setup() function runs only once when the
-// robot is powered up (either by plugging in
-// the USB cable, or activating the motor power.
-// Use this function to do "once only" setup 
-// and configuration of your robot.
+// =================================================================
+//  SETUP
+// =================================================================
 void setup() {
-  // Setup up the buzzer as an output
-  pinMode( BUZZER_PIN, OUTPUT );
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BUTTON_A_PIN, INPUT_PULLUP);
 
-  // Setup button A as input with internal pull-up resistor
-  // Button reads LOW when pressed, HIGH when released
-  pinMode( BUTTON_A_PIN, INPUT_PULLUP );
-
-  // Setup motors.  This is calling a function
-  // from within the Motors_c class. You can 
-  // review this inside Motors.h
-  // Complete by working through Labsheet 1.
   motors.initialise();
-
-  // Setup the line sensors.  This is calling a 
-  // function from within the LineSensors_c 
-  // class. You can review this inside 
-  // LineSensors.h.  
-  // Complete by working through Labsheet 2.
-  line_sensors.initialiseForADC();
-
-  // These two functions are in encoders.h and
-  // they activate the encoder sensors to 
-  // measure the wheel rotation.  You do not 
-  // need to change or update these.
-  // These are used in Labsheet 4.
-  // Encoder counts are counted automatically.
   setupEncoder0();
   setupEncoder1();
-
-  // Setup the pose (kinematics). This is calling 
-  // a function within the Kinematics_c class.
-  // You can review this within Kinematics.h
-  // This is used in Labsheet 4.
   pose.initialise(0, 0, 0);
 
-  // Activates the Serial port, and the delay
-  // is used to wait for the connection to be
-  // established.
-  Serial.begin(9600);
-  delay(2000);
-  Serial.println(" *** READY *** ");
+  Serial.begin(115200);
+  delay(1500);
 
-  // If you are using an OLED or LCD display,
-  // the following will set up a count down
-  // timer to be displayed.
-  // display.setMaxMinutes(4);
-  // display.startStopwatch();
-
-  // ============================================
-  // WAIT FOR BUTTON A PRESS TO START
-  // ============================================
-  // All hardware is now initialised. Wait here
-  // so you can position the robot on the
-  // calibration disk before anything moves.
   Serial.println();
-  Serial.println("=================================");
-  Serial.println("  Press BUTTON A to start robot");
-  Serial.println("=================================");
+  Serial.println("========================================");
+  Serial.print  ("  TUNING MODE — LAYER ");
+  Serial.println(TUNE_LAYER);
+  Serial.println("========================================");
+  Serial.println("Press BUTTON A to begin.");
 
-  while (digitalRead(BUTTON_A_PIN) != LOW) {
-    // Wait for button press
-  }
-  // Debounce: wait for button release
+  // Wait for initial button press
+  while (digitalRead(BUTTON_A_PIN) != LOW) {}
   delay(50);
   while (digitalRead(BUTTON_A_PIN) == LOW) {}
   delay(50);
-
-  tone(BUZZER_PIN, 440, 100);  // Short beep to confirm start
-  Serial.println("*** ROBOT STARTED ***");
-
-  // ============================================
-  // STAGE 3: Initialize speed measurement
-  // ============================================
-  // Capture initial encoder counts
-  prev_count_e0 = count_e0;
-  prev_count_e1 = count_e1;
-
-  // Initialize speeds to zero (robot starts stationary)
-  speed_e0 = 0.0;
-  speed_e1 = 0.0;
-
-  // Capture starting timestamp
-  speed_measurement_ts = millis();
-
-  Serial.println("Stage 3: Speed measurement initialized");
-
-  // ============================================
-  // STAGE 4: Initialize PID Controllers
-  // ============================================
-
-  // Starting gains for PID tuning
-  // BEGIN WITH P-ONLY CONTROL: Kp = 100, Ki = 0.0, Kd = 0.0
-  // These are initial guesses and MUST be tuned physically
-  // NOTE: Kp must be large because speed is in counts/ms (small values)
-  //       but PWM needs to be 20-255 (large values)
-  float initial_Kp = 40.0;  // Start with proportional control only
-  float initial_Ki = 0.8;    // Integral term disabled initially
-  float initial_Kd = 0.0;    // Derivative term disabled initially
-
-  // Initialize left motor PID
-  left_pid.initialise(initial_Kp, initial_Ki, initial_Kd);
-
-  // Initialize right motor PID
-  right_pid.initialise(initial_Kp, initial_Ki, initial_Kd);
-
-  // Initialize demand speeds to zero (stopped)
-  demand_speed_left = 0.0;
-  demand_speed_right = 0.0;
-
-  // PID starts disabled for safety
-  // Enable by setting use_pid_control = true in your code
-  use_pid_control = false;
-
-  // Capture starting timestamp for PID updates
-  pid_update_ts = millis();
-
-  Serial.println("Stage 4: PID controllers initialized");
-  Serial.print("  Kp=");
-  Serial.print(initial_Kp);
-  Serial.print(", Ki=");
-  Serial.print(initial_Ki);
-  Serial.print(", Kd=");
-  Serial.println(initial_Kd);
-  Serial.println("  NOTE: Kp is large because speed units (counts/ms) are small");
-  Serial.println("  PID control: DISABLED (use_pid_control=false)");
-  Serial.println("  To enable: set use_pid_control=true in code");
-
-  // ============================================
-  // STAGE 5: Line Sensor Calibration
-  // ============================================
-  // The robot will rotate on the spot over black and white surfaces
-  // to learn the min/max sensor values for calibration
-  //
-  // IMPORTANT: Place robot on the calibration disk (alternating
-  // black/white pattern at start position) before powering on!
-  //
-  // Uncomment the following line to enable calibration at startup:
-  //calibrateLineSensors();
-
-  //Serial.println("Stage 5: Line sensors initialized");
-
-  // ============================================
-  // STAGE 9: Initialize & Calibrate Magnetometer
-  // ============================================
-  // Must happen BEFORE the pose reinit so the calibration
-  // spin is not counted in the starting odometry.
-  mag_ok = magnetometer.initialise();
-  if ( mag_ok ) {
-    Serial.println("Stage 9: Magnetometer found on I2C bus");
-    calibrateMagnetometer();
-  } else {
-    Serial.println("WARNING: Magnetometer NOT found! Puck detection disabled.");
-  }
-
-  // Re-initialise pose AFTER calibration spins so rotation
-  // does not corrupt the starting odometry.
-  pose.initialise(0, 0, 0);
-
-  // ============================================
-  // STAGE 7: Initialize Kinematics
-  // ============================================
-  // Capture starting timestamp for pose updates
-  pose_update_ts = millis();
-
-  Serial.println("Stage 7: Kinematics initialized");
-  Serial.println("  Call pose.update() every 20ms for odometry");
-  Serial.println("  Navigation functions: setTurn(), checkTurn(), travelToXY()");
-  Serial.println("  IMPORTANT: Calibrate wheel_radius and wheel_sep in Kinematics.h");
-
-  // ============================================
-  // STAGE 6: Start FSM & Timer
-  // ============================================
-  // Seed RNG (used for random turn durations / directions)
-  randomSeed(analogRead(A0) + millis());
-
-  // Enable PID closed-loop speed control for all driving
-  use_pid_control = true;
-
-  // Start the 4-minute countdown.  Placed last so the
-  // calibration spin (3 s) does not count against the run.
-  timer_start_ms = millis();
-
-  travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
-}
-
-// ============================================
-// STAGE 5: LINE SENSOR CALIBRATION FUNCTION
-// ============================================
-// This function rotates the robot on the spot while collecting
-// sensor readings to determine min/max values for each sensor.
-// Call this once at startup with robot on calibration disk.
-void calibrateLineSensors() {
-
-  Serial.println("Starting line sensor calibration...");
-  Serial.println("Robot will rotate for 3 seconds.");
-
-  // Reset calibration to prepare for new values
-  line_sensors.resetCalibration();
-
-  // Start rotating on the spot (left wheel backward, right wheel forward)
-  // Use low speed for better calibration
-  motors.setPWM(-40, 40);
-
-  // Calibration duration in milliseconds
-  unsigned long calibration_duration = 3000;
-  unsigned long start_time = millis();
-
-  // Collect readings while rotating
-  while (millis() - start_time < calibration_duration) {
-    // Update calibration with new readings
-    line_sensors.updateCalibration();
-
-    // Small delay between readings
-    delay(10);
-  }
-
-  // Stop motors
-  motors.setPWM(0, 0);
-
-  // Calculate final calibration values (scaling = range)
-  line_sensors.finalizeCalibration();
-
-  // Mark as calibrated
-  line_sensors_calibrated = true;
-
-  // Report calibration results
-  Serial.println("Calibration complete!");
-  Serial.println("Sensor calibration values:");
-  for (int i = 0; i < NUM_SENSORS; i++) {
-    Serial.print("  Sensor ");
-    Serial.print(i);
-    Serial.print(": min=");
-    Serial.print(line_sensors.minimum[i]);
-    Serial.print(", max=");
-    Serial.print(line_sensors.maximum[i]);
-    Serial.print(", range=");
-    Serial.println(line_sensors.scaling[i]);
-  }
-
-  // Short delay before continuing
-  delay(500);
-}
-
-
-// ============================================
-// STAGE 9: MAGNETOMETER CALIBRATION FUNCTION
-// ============================================
-// Rotates the robot exactly 3 full revolutions using
-// setRotation/checkRotation (PID-controlled), collecting
-// magnetometer min/max per axis throughout.  The robot
-// finishes facing the same direction it started (+X).
-//
-// Runs in setup() as a blocking loop that manually pumps
-// the system update functions (speeds, PID, pose).
-//
-// Place the robot on a flat surface AWAY from metal objects
-// (table legs, laptops, phones) before running.
-void calibrateMagnetometer() {
-
-  Serial.println("Starting magnetometer calibration...");
-  Serial.println("Robot will rotate 3 full turns (PID-controlled).");
-
-  magnetometer.resetCalibration();
-
-  // Temporarily enable PID for controlled rotation
-  bool pid_was_enabled = use_pid_control;
-  use_pid_control = true;
-  left_pid.reset();
-  right_pid.reset();
-
-  // 3 full CCW revolutions = 6*PI radians
-  setRotation(3.0 * 2.0 * PI);
-
-  unsigned long last_mag_read = 0;
-
-  // Blocking loop: pump system updates + rotation + mag reads
-  while ( !checkRotation() ) {
-    measureSpeeds();
-    updatePID();
-    updatePose();
-
-    // Read magnetometer every 100 ms (sensor timing limit)
-    if ( millis() - last_mag_read >= 100 ) {
-      magnetometer.updateCalibration();
-      last_mag_read = millis();
-    }
-  }
-
-  // Ensure motors are stopped
-  stopWithPID();
-
-  // Restore previous PID state
-  use_pid_control = pid_was_enabled;
-
-  // Compute offset and scaling from captured min/max
-  magnetometer.finalizeCalibration();
-
-  // Report calibration results
-  Serial.println("Magnetometer calibration complete!");
-  for ( int i = 0; i < MAG_AXIS; i++ ) {
-    Serial.print("  Axis ");
-    Serial.print(i);
-    Serial.print(": min=");
-    Serial.print(magnetometer.minimum[i], 0);
-    Serial.print(", max=");
-    Serial.print(magnetometer.maximum[i], 0);
-    Serial.print(", offset=");
-    Serial.print(magnetometer.offset[i], 1);
-    Serial.print(", scaling=");
-    Serial.println(magnetometer.scaling[i], 1);
-  }
-
-  delay(500);
-}
-
-// ============================================
-// STAGE 9: NON-BLOCKING MAGNETOMETER READ
-// ============================================
-// Call from loop(). Respects the 100 ms minimum interval
-// between I2C reads.  Updates mag_magnitude with the
-// latest calibrated vector magnitude.
-void readMagnetometer() {
-  if ( !mag_ok ) return;  // Sensor failed to init
-
-  unsigned long now = millis();
-  if ( now - mag_read_ts >= MAG_READ_INTERVAL ) {
-    magnetometer.getReadings();
-    mag_magnitude = magnetometer.getMagnitude();
-    mag_read_ts = now;
-
-    // TEMPORARY: print magnitude for threshold calibration
-    // Remove this once PUCK_MAGNITUDE_THRESHOLD is set
-    Serial.print("MAG:");
-    Serial.println(mag_magnitude, 3);
-  }
-}
-
-// ============================================
-// STAGE 9: PUCK DETECTION WRAPPER
-// ============================================
-// Returns true if the latest magnitude reading exceeds
-// PUCK_MAGNITUDE_THRESHOLD.  Safe to call every loop
-// iteration; it uses the cached mag_magnitude updated
-// by readMagnetometer().
-bool detectPuck() {
-  return ( mag_magnitude > PUCK_MAGNITUDE_THRESHOLD );
-}
-
-
-// Function to measure and calculate wheel speeds
-// This is non-blocking and should be called regularly from loop()
-void measureSpeeds() {
-
-  // Check if it's time to measure speed
-  unsigned long current_time = millis();
-  unsigned long elapsed_time = current_time - speed_measurement_ts;
-
-  if (elapsed_time >= SPEED_MEASUREMENT_INTERVAL) {
-
-    // Atomic read: disable interrupts while copying volatile
-    // encoder counts (4-byte long is not atomic on 8-bit AVR)
-    long local_e0, local_e1;
-    noInterrupts();
-    local_e0 = count_e0;
-    local_e1 = count_e1;
-    interrupts();
-
-    // Calculate change in encoder counts since last measurement
-    long delta_e0 = local_e0 - prev_count_e0;
-    long delta_e1 = local_e1 - prev_count_e1;
-
-    // Save current counts for next measurement
-    prev_count_e0 = local_e0;
-    prev_count_e1 = local_e1;
-
-    // Calculate speed as counts per millisecond
-    // Typecast to float for precision
-    // Speed = change in counts / change in time
-    speed_e0 = (float)delta_e0 / (float)elapsed_time;
-    speed_e1 = (float)delta_e1 / (float)elapsed_time;
-
-    // Update timestamp for next measurement
-    speed_measurement_ts = current_time;
-
-    // Optional: Print speeds for debugging (comment out if not needed)
-    // Serial.print("L:");
-    // Serial.print(speed_e0, 4);
-    // Serial.print(",R:");
-    // Serial.println(speed_e1, 4);
-  }
-}
-
-// ============================================
-// STAGE 4: PID CONTROL FUNCTION
-// ============================================
-
-/*
- * Update PID controllers and apply motor commands
- *
- * This function should be called regularly from loop()
- * It runs every 50ms to give PID controllers time to respond
- *
- * When use_pid_control is true:
- *   - PID controllers calculate PWM based on speed error
- *   - Motors are controlled to achieve demand speeds
- *
- * When use_pid_control is false:
- *   - Direct PWM control (Stage 2 behavior)
- *   - PID controllers are reset to prevent integral windup
- */
-void updatePID() {
-
-  // Check if it's time to update PID (every 50ms)
-  unsigned long current_time = millis();
-  unsigned long elapsed_time = current_time - pid_update_ts;
-
-  if (elapsed_time >= PID_UPDATE_INTERVAL) {
-
-    if (use_pid_control) {
-      // ============================================
-      // PID CLOSED-LOOP CONTROL ENABLED
-      // ============================================
-
-      // Update left motor PID
-      // Inputs: demand speed, measured speed
-      // Output: PWM value to apply to motor
-      // NOTE: Encoder mapping from Encoders.h:
-      //   count_e0 / speed_e0 = RIGHT wheel
-      //   count_e1 / speed_e1 = LEFT wheel
-      if (demand_speed_left == 0.0) {
-        left_pwm_output = 0.0;
-        left_pid.reset();  // Clear stale integral to prevent jump on resume
-      } else {
-        left_pwm_output = left_pid.update(demand_speed_left, speed_e1);
-      }
-      // Update right motor PID
-      if (demand_speed_right == 0.0) {
-        right_pwm_output = 0.0;
-        right_pid.reset();  // Clear stale integral to prevent jump on resume
-      } else {
-        right_pwm_output = right_pid.update(demand_speed_right, speed_e0);
-      }
-      // Apply PID outputs to motors
-      motors.setPWM(left_pwm_output, right_pwm_output);
-
-      // Debug output for tuning
-      // NOTE: speed_e1 = LEFT, speed_e0 = RIGHT (from Encoders.h)
-      //Serial.print("DemL:");
-      //Serial.print(demand_speed_left, 4);
-      //Serial.print(",MeasL:");
-      //Serial.print(speed_e1, 4);           // Corrected: e1 is left
-      //Serial.print(",PWML:");
-      //Serial.print(left_pwm_output, 1);
-      //Serial.print(" | DemR:");
-      //Serial.print(demand_speed_right, 4);
-      //Serial.print(",MeasR:");
-      //Serial.print(speed_e0, 4);           // Corrected: e0 is right
-      //Serial.print(",PWMR:");
-      //Serial.println(right_pwm_output, 1);
-
-    } else {
-      // ============================================
-      // PID DISABLED - Direct PWM control
-      // ============================================
-
-      // Reset PID controllers to prevent integral windup
-      // This ensures clean startup when PID is re-enabled
-      left_pid.reset();
-      right_pid.reset();
-
-      // Direct PWM control is handled elsewhere in code
-      // (e.g., motor test states or manual commands)
-    }
-
-    // Update timestamp for next PID cycle
-    pid_update_ts = current_time;
-  }
-}
-
-/*
- * Set target speeds for both motors
- *
- * @param left_speed: Target speed for left wheel (counts/ms)
- * @param right_speed: Target speed for right wheel (counts/ms)
- *
- * Note: This only has effect when use_pid_control = true
- */
-void setDemandSpeeds(float left_speed, float right_speed) {
-  demand_speed_left = left_speed;
-  demand_speed_right = right_speed;
-}
-
-/*
- * Convenience function: Set same speed for both motors (straight line)
- *
- * @param speed: Target speed for both wheels (counts/ms)
- */
-void setDemandSpeed(float speed) {
-  setDemandSpeeds(speed, speed);
-}
-
-/*
- * Stop motors smoothly using PID
- * Sets demand speeds to zero
- */
-void stopWithPID() {
-  setDemandSpeeds(0.0, 0.0);
-  motors.setPWM(0, 0);  // Zero PWM directly for immediate stop
-  left_pid.reset();
-  right_pid.reset();
-}
-
-// ============================================
-// STAGE 5: LINE SENSOR HELPER FUNCTIONS
-// ============================================
-
-/*
- * Check if any line sensor detects a black line
- * Uses calibrated readings if calibration was performed
- *
- * @return true if any sensor detects black line, false otherwise
- */
-bool isOnLine() {
-  if (line_sensors_calibrated) {
-    // Use calibrated isOnLine with threshold
-    return line_sensors.isOnLine(LINE_THRESHOLD);
-  } else {
-    // Without calibration, use raw readings with typical threshold
-    // Raw ADC values: ~600-700 for white, ~900-1000 for black (typical)
-    line_sensors.readSensorsADC();
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      if (line_sensors.readings[i] > 800) {  // Typical threshold for uncalibrated
-        return true;
-      }
-    }
-    return false;
-  }
-}
-
-/*
- * Check if a specific sensor detects the line
- *
- * @param sensor_index: 0=DN1(left), 1=DN2, 2=DN3(center), 3=DN4, 4=DN5(right)
- * @return true if specified sensor is on line
- */
-bool isSensorOnLine(int sensor_index) {
-  if (line_sensors_calibrated) {
-    return line_sensors.isSensorOnLine(sensor_index, LINE_THRESHOLD);
-  } else {
-    line_sensors.readSensorsADC();
-    if (sensor_index >= 0 && sensor_index < NUM_SENSORS) {
-      return line_sensors.readings[sensor_index] > 800;
-    }
-    return false;
-  }
-}
-
-/*
- * Get pattern of which sensors are on the line
- * Useful for determining line position relative to robot
- *
- * @return bitmask: bit 0=DN1(left), bit 1=DN2, bit 2=DN3(center), etc.
- *         Example: 0b00100 (=4) means only center sensor on line
- *         Example: 0b00001 (=1) means only left sensor on line
- *         Example: 0b10000 (=16) means only right sensor on line
- */
-byte getLineSensorPattern() {
-  if (line_sensors_calibrated) {
-    return line_sensors.getLineSensorPattern(LINE_THRESHOLD);
-  } else {
-    line_sensors.readSensorsADC();
-    byte pattern = 0;
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      if (line_sensors.readings[i] > 800) {
-        pattern |= (1 << i);
-      }
-    }
-    return pattern;
-  }
-}
-
-/*
- * Print line sensor readings for debugging
- * Prints calibrated values if calibrated, raw values otherwise
- */
-void printLineSensorReadings() {
-  if (line_sensors_calibrated) {
-    line_sensors.calcCalibratedADC();
-    Serial.print("Cal: ");
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      Serial.print(line_sensors.calibrated[i], 2);
-      if (i < NUM_SENSORS - 1) Serial.print(", ");
-    }
-  } else {
-    line_sensors.readSensorsADC();
-    Serial.print("Raw: ");
-    for (int i = 0; i < NUM_SENSORS; i++) {
-      Serial.print(line_sensors.readings[i], 0);
-      if (i < NUM_SENSORS - 1) Serial.print(", ");
-    }
-  }
+  tone(BUZZER_PIN, 880, 100);
+
+  // Initialise PID (needed for layers 3+)
+  left_pid.initialise(TUNE_KP, TUNE_KI, TUNE_KD);
+  right_pid.initialise(TUNE_KP, TUNE_KI, TUNE_KD);
+
+  // Capture timestamps
+  prev_e0 = count_e0;
+  prev_e1 = count_e1;
+  speed_ts  = millis();
+  pid_ts    = millis();
+  pose_ts   = millis();
+
+  Serial.println("*** STARTED ***");
   Serial.println();
 }
 
-// ============================================
-// STAGE 7: KINEMATICS UPDATE FUNCTION
-// ============================================
+// =================================================================
+//  CORE SYSTEM FUNCTIONS
+// =================================================================
 
-/*
- * Update robot pose (x, y, theta) using encoder counts
- * MUST be called regularly at fixed interval (20ms recommended)
- * Call this from loop() after measureSpeeds()
- */
-void updatePose() {
-  unsigned long current_time = millis();
-  unsigned long elapsed_time = current_time - pose_update_ts;
+void measureSpeeds() {
+  unsigned long now = millis();
+  unsigned long dt  = now - speed_ts;
+  if (dt >= SPEED_INTERVAL) {
+    long le0, le1;
+    noInterrupts();
+    le0 = count_e0;
+    le1 = count_e1;
+    interrupts();
 
-  if (elapsed_time >= POSE_UPDATE_INTERVAL) {
-    pose.update();  // Update kinematics
-    pose_update_ts = current_time;
+    speed_e0 = (float)(le0 - prev_e0) / (float)dt;
+    speed_e1 = (float)(le1 - prev_e1) / (float)dt;
+    prev_e0 = le0;
+    prev_e1 = le1;
+    speed_ts = now;
   }
 }
 
-// ============================================
-// STAGE 7: NAVIGATION HELPER FUNCTIONS
-// ============================================
+void updatePID() {
+  unsigned long now = millis();
+  if (now - pid_ts < PID_INTERVAL) return;
 
-/*
- * Calculate the smallest angular difference between two angles
- * Handles wraparound at 0/2π boundary
- *
- * @param target_angle: Desired angle (radians)
- * @param current_angle: Current angle (radians)
- * @return: Smallest difference in radians, range [-π, π]
- *          Positive = turn left, Negative = turn right
- */
-float angleDiff(float target_angle, float current_angle) {
-  // Calculate raw difference
-  float diff = target_angle - current_angle;
-
-  // Normalize to [-π, π] using atan2 trick
-  // This handles the 0°/360° wraparound elegantly
-  diff = atan2(sin(diff), cos(diff));
-
-  return diff;
+  if (use_pid) {
+    if (demand_left == 0.0) {
+      pwm_left = 0.0;
+      left_pid.reset();
+    } else {
+      pwm_left = left_pid.update(demand_left, speed_e1);
+    }
+    if (demand_right == 0.0) {
+      pwm_right = 0.0;
+      right_pid.reset();
+    } else {
+      pwm_right = right_pid.update(demand_right, speed_e0);
+    }
+    motors.setPWM(pwm_left, pwm_right);
+  } else {
+    left_pid.reset();
+    right_pid.reset();
+  }
+  pid_ts = now;
 }
 
-/*
- * Calculate angle from current position to target (x,y)
- * Uses atan2 to handle all quadrants correctly
- *
- * @param target_x: Target X coordinate (mm)
- * @param target_y: Target Y coordinate (mm)
- * @return: Angle to target in radians
- */
-float angleToPoint(float target_x, float target_y) {
-  float dx = target_x - pose.x;
-  float dy = target_y - pose.y;
-  return atan2(dy, dx);
+void updatePose() {
+  unsigned long now = millis();
+  if (now - pose_ts >= POSE_INTERVAL) {
+    pose.update();
+    pose_ts = now;
+  }
 }
 
-/*
- * Calculate distance from current position to target (x,y)
- *
- * @param target_x: Target X coordinate (mm)
- * @param target_y: Target Y coordinate (mm)
- * @return: Distance to target in mm
- */
-float distanceToPoint(float target_x, float target_y) {
-  float dx = target_x - pose.x;
-  float dy = target_y - pose.y;
+// ---- helpers ----
+
+void setDemands(float l, float r) { demand_left = l; demand_right = r; }
+
+void stopPID() {
+  setDemands(0, 0);
+  motors.setPWM(0, 0);
+  left_pid.reset();
+  right_pid.reset();
+}
+
+void resetPose() {
+  pose.initialise(0, 0, 0);
+}
+
+void beep(int freq, int ms) { tone(BUZZER_PIN, freq, ms); }
+
+// Print pose in a compact, readable format
+void printPose(const char* label) {
+  Serial.print(label);
+  Serial.print("  x="); Serial.print(pose.x, 1);
+  Serial.print("  y="); Serial.print(pose.y, 1);
+  Serial.print("  th="); Serial.print(pose.theta * 180.0 / PI, 1);
+  Serial.println("°");
+}
+
+// =================================================================
+//  NAVIGATION FUNCTIONS (identical logic to main codebase)
+// =================================================================
+
+float angleDiff(float target, float current) {
+  return atan2(sin(target - current), cos(target - current));
+}
+
+float angleToPoint(float tx, float ty) {
+  return atan2(ty - pose.y, tx - pose.x);
+}
+
+float distToPoint(float tx, float ty) {
+  float dx = tx - pose.x, dy = ty - pose.y;
   return sqrt(dx*dx + dy*dy);
 }
 
-// ============================================
-// STAGE 7: TURN BEHAVIOR
-// ============================================
+// ---- TURN (absolute heading) ----
 
-/*
- * Initialize a turn to a specific angle
- * Call this ONCE when you want to start a turn
- *
- * @param angle: Target orientation in radians
- */
 void setTurn(float angle) {
-  target_angle = angle;
-  turning = true;
+  nav_target_angle = angle;
+  nav_turning = true;
 }
 
-/*
- * Non-blocking turn update function
- * Call this repeatedly from loop() while turning
- *
- * @return: true if turn complete, false if still turning
- */
 bool checkTurn() {
-  if (!turning) {
-    Serial.println("finished turning");
-    return true;  // Not turning, return complete
+  if (!nav_turning) return true;
+  float err = angleDiff(nav_target_angle, pose.theta);
+  if (fabs(err) < TURN_THRESHOLD) {
+    stopPID(); nav_turning = false; return true;
   }
-
-  // Calculate angular difference (smallest angle)
-  float angle_error = angleDiff(target_angle, pose.theta);
-
-  // Check if turn is complete
-  if (abs(angle_error) < TURN_THRESHOLD) {
-    stopWithPID();
-    turning = false;
-    return true;  // Turn complete
-  }
-
-  // Calculate turn speed proportional to error
-  float turn_speed = angle_error * TURN_GAIN;
-  // Constrain turn speed to maximum allowed value
-  if (turn_speed > MAX_TURN_SPEED) turn_speed = MAX_TURN_SPEED;
-  if (turn_speed < -MAX_TURN_SPEED) turn_speed = -MAX_TURN_SPEED;
-  // Floor at minimum speed to overcome motor dead-band
-  if (fabs(turn_speed) < MIN_TURN_SPEED) {
-    turn_speed = (angle_error > 0) ? MIN_TURN_SPEED : -MIN_TURN_SPEED;
-  }
-
-  // Apply turn speeds (opposite directions for rotation on spot)
-  if (use_pid_control) {
-    // Using PID speed control
-    // Left wheel: positive speed turns left
-    // Right wheel: negative speed turns right
-    setDemandSpeeds(-turn_speed, turn_speed);
-  } else {
-    // Direct PWM control
-    float turn_pwm = turn_speed;
-    // Constrain to reasonable PWM range
-    if (turn_pwm > 100) turn_pwm = 100;
-    if (turn_pwm < -100) turn_pwm = -100;
-    motors.setPWM(turn_pwm, -turn_pwm);
-  }
-
-  return false;  // Still turning
+  float spd = err * TURN_GAIN;
+  if (spd >  MAX_TURN_SPEED) spd =  MAX_TURN_SPEED;
+  if (spd < -MAX_TURN_SPEED) spd = -MAX_TURN_SPEED;
+  if (fabs(spd) < MIN_TURN_SPEED)
+    spd = (err > 0) ? MIN_TURN_SPEED : -MIN_TURN_SPEED;
+  setDemands(-spd, spd);
+  return false;
 }
 
-// ============================================
-// STAGE 7: RELATIVE ROTATION BEHAVIOR
-// ============================================
+// ---- ROTATION (relative, multi-rev) ----
 
-/*
- * Start a rotation BY a given number of radians (relative).
- * Unlike setTurn() which targets an absolute heading, this
- * accumulates angular change so it can handle multi-revolution
- * rotations (e.g. 3 full turns = 6*PI).
- *
- * @param radians: Amount to rotate. Positive = CCW, Negative = CW.
- */
 void setRotation(float radians) {
-  rotate_target = radians;
-  rotate_accumulated = 0.0;
-  rotate_prev_theta = pose.theta;
-  rotating = true;
+  rot_target = radians;
+  rot_accumulated = 0.0;
+  rot_prev_theta = pose.theta;
+  nav_rotating = true;
 }
 
-/*
- * Non-blocking rotation update function.
- * Call this repeatedly from loop() while rotating.
- * Uses the same TURN_GAIN, MAX_TURN_SPEED and TURN_THRESHOLD
- * as checkTurn() for consistent behaviour.
- *
- * @return: true if rotation complete, false if still rotating
- */
 bool checkRotation() {
-  if (!rotating) return true;
-
-  // Accumulate the small angular change since last call.
-  // angleDiff handles the ±PI wraparound per step so the
-  // running total can exceed 2*PI for multi-revolution spins.
-  float delta = angleDiff(pose.theta, rotate_prev_theta);
-  rotate_accumulated += delta;
-  rotate_prev_theta = pose.theta;
-
-  // How much rotation remains
-  float remaining = rotate_target - rotate_accumulated;
-
-  // Check if rotation is complete
-  if (abs(remaining) < TURN_THRESHOLD) {
-    stopWithPID();
-    rotating = false;
-    return true;
+  if (!nav_rotating) return true;
+  float delta = angleDiff(pose.theta, rot_prev_theta);
+  rot_accumulated += delta;
+  rot_prev_theta = pose.theta;
+  float remaining = rot_target - rot_accumulated;
+  if (fabs(remaining) < TURN_THRESHOLD) {
+    stopPID(); nav_rotating = false; return true;
   }
-
-  // Proportional speed control on remaining angle
-  float turn_speed = remaining * TURN_GAIN;
-  if (turn_speed > MAX_TURN_SPEED) turn_speed = MAX_TURN_SPEED;
-  if (turn_speed < -MAX_TURN_SPEED) turn_speed = -MAX_TURN_SPEED;
-  // Floor at minimum speed to overcome motor dead-band
-  if (fabs(turn_speed) < MIN_TURN_SPEED) {
-    turn_speed = (remaining > 0) ? MIN_TURN_SPEED : -MIN_TURN_SPEED;
-  }
-
-  if (use_pid_control) {
-    setDemandSpeeds(-turn_speed, turn_speed);
-  } else {
-    float turn_pwm = turn_speed;
-    if (turn_pwm > 100) turn_pwm = 100;
-    if (turn_pwm < -100) turn_pwm = -100;
-    motors.setPWM(turn_pwm, -turn_pwm);
-  }
-
+  float spd = remaining * TURN_GAIN;
+  if (spd >  MAX_TURN_SPEED) spd =  MAX_TURN_SPEED;
+  if (spd < -MAX_TURN_SPEED) spd = -MAX_TURN_SPEED;
+  if (fabs(spd) < MIN_TURN_SPEED)
+    spd = (remaining > 0) ? MIN_TURN_SPEED : -MIN_TURN_SPEED;
+  setDemands(-spd, spd);
   return false;
 }
 
-// ============================================
-// STAGE 7: REVERSE BEHAVIOR
-// ============================================
+// ---- TRAVEL (straight to point) ----
 
-/*
- * Start a straight-line reverse by a given distance.
- * Non-blocking: call checkReverse() each loop iteration.
- * Uses odometry (pose) to measure distance travelled.
- *
- * @param distance_mm: How far to reverse (positive value, mm).
- *                     Defaults to REVERSE_DISTANCE if 0 is passed.
- */
-void setReverse(float distance_mm) {
-  reverse_target_dist = (distance_mm > 0) ? distance_mm : REVERSE_DISTANCE;
-  reverse_start_x = pose.x;
-  reverse_start_y = pose.y;
-  reversing_dist = true;
-}
-
-/*
- * Non-blocking reverse update function.
- * Call this repeatedly from loop() while reversing.
- *
- * @return: true if reverse complete, false if still reversing
- */
-bool checkReverse() {
-  if (!reversing_dist) return true;
-
-  // Calculate distance from starting position
-  float dx = pose.x - reverse_start_x;
-  float dy = pose.y - reverse_start_y;
-  float dist_traveled = sqrt(dx * dx + dy * dy);
-
-  // Check if target distance reached
-  if (dist_traveled >= reverse_target_dist) {
-    stopWithPID();
-    reversing_dist = false;
-    return true;
-  }
-
-  // Drive backward at constant reverse speed
-  if (use_pid_control) {
-    setDemandSpeeds(REVERSE_SPEED, REVERSE_SPEED);
-  } else {
-    motors.setPWM(-30, -30);
-  }
-
-  return false;
-}
-
-// ============================================
-// STAGE 7: TRAVEL BEHAVIOR
-// ============================================
-
-/*
- * Initialize travel to a specific (x,y) coordinate
- * Robot will drive straight, making small heading corrections
- * Call this ONCE when you want to start traveling
- *
- * @param x: Target X coordinate (mm)
- * @param y: Target Y coordinate (mm)
- */
 void setTravel(float x, float y) {
-  target_x = x;
-  target_y = y;
-  init_x = pose.x;  // Capture starting position for distance tracking
-  init_y = pose.y;
-  target_init_dist = distanceToPoint(target_x, target_y);
-  traveling = true;
+  nav_target_x = x;  nav_target_y = y;
+  nav_init_x = pose.x; nav_init_y = pose.y;
+  nav_init_dist = distToPoint(x, y);
+  nav_traveling = true;
 }
 
-/*
- * Non-blocking travel update function
- * Call this repeatedly from loop() while traveling
- * Robot moves toward target while correcting heading
- *
- * @return: true if travel complete, false if still traveling
- */
 bool checkTravel() {
-  if (!traveling) return true;  // Not traveling, return complete
-
-  // Calculate distance to target
-  float distance = distanceToPoint(target_x, target_y);
-  float distance_traveled = distanceToPoint(init_x, init_y);
-  // Check if travel is complete
-  if (distance < TRAVEL_THRESHOLD || distance_traveled >= target_init_dist) {
-    stopWithPID();
-    traveling = false;
-    return true;  // Travel complete
+  if (!nav_traveling) return true;
+  float dist = distToPoint(nav_target_x, nav_target_y);
+  float traveled = distToPoint(nav_init_x, nav_init_y);
+  if (dist < TRAVEL_THRESHOLD || traveled >= nav_init_dist) {
+    stopPID(); nav_traveling = false; return true;
   }
-
-  // Calculate desired heading to target
-  float desired_heading = angleToPoint(target_x, target_y);
-
-  // Calculate heading error
-  float heading_error = angleDiff(desired_heading, pose.theta);
-
-  // Calculate base forward speed with deceleration near target
-  float forward_speed = TRAVEL_SPEED;
-  if (distance < TRAVEL_DECEL_DISTANCE) {
-    forward_speed = TRAVEL_SPEED * (distance / TRAVEL_DECEL_DISTANCE);
-    if (forward_speed < MIN_TRAVEL_SPEED) forward_speed = MIN_TRAVEL_SPEED;
+  float heading_err = angleDiff(
+    angleToPoint(nav_target_x, nav_target_y), pose.theta);
+  float fwd = TRAVEL_SPEED;
+  if (dist < TRAVEL_DECEL_DIST) {
+    fwd = TRAVEL_SPEED * (dist / TRAVEL_DECEL_DIST);
+    if (fwd < MIN_TRAVEL_SPEED) fwd = MIN_TRAVEL_SPEED;
   }
-
-  // Calculate heading correction
-  float heading_correction = heading_error * HEADING_CORRECTION_GAIN;
-
-  // Apply differential speeds for heading correction
-  float left_speed = forward_speed + heading_correction;
-  float right_speed = forward_speed - heading_correction;
-
-  if (use_pid_control) {
-    setDemandSpeeds(left_speed, right_speed);
-  } else {
-    // Direct PWM control
-    float left_pwm = left_speed * 100;  // Scale to PWM
-    float right_pwm = right_speed * 100;
-    // Constrain PWM
-    if (left_pwm > 100) left_pwm = 100;
-    if (left_pwm < -100) left_pwm = -100;
-    if (right_pwm > 100) right_pwm = 100;
-    if (right_pwm < -100) right_pwm = -100;
-    motors.setPWM(left_pwm, right_pwm);
-  }
-
-  return false;  // Still traveling
+  float corr = heading_err * HEADING_CORR_GAIN;
+  setDemands(fwd + corr, fwd - corr);
+  return false;
 }
 
-// ============================================
-// STAGE 7: COMBINED TRAVEL-TO-XY BEHAVIOR
-// ============================================
+// ---- TRAVEL-TO-XY (turn then travel, with settling) ----
 
-/*
- * High-level navigation function
- * Rotates to face target, then travels to it
- * This is the recommended function for waypoint navigation
- *
- * Call this ONCE to start navigation:
- *   travelToXY(x, y);
- *
- * Then call updateTravelToXY() repeatedly from loop():
- *   updateTravelToXY();
- *
- * @param x: Target X coordinate (mm)
- * @param y: Target Y coordinate (mm)
- */
 void travelToXY(float x, float y) {
-  target_x = x;
-  target_y = y;
-
-  // Stop motors and reset PIDs before settling
-  stopWithPID();
-  settle_start_ms = millis();
-  settle_next_state = TRAVEL_ROTATING;
-  travel_state = TRAVEL_SETTLING;
+  nav_target_x = x; nav_target_y = y;
+  stopPID();
+  settle_start = millis();
+  settle_next = TS_ROTATING;
+  ts_state = TS_SETTLING;
 }
 
-/*
- * Non-blocking update for travelToXY behavior
- * Call this repeatedly from loop()
- *
- * @return: true if navigation complete, false otherwise
- */
 bool updateTravelToXY() {
-  switch (travel_state) {
-    case TRAVEL_IDLE:
-      // Not navigating
-      return true;
+  switch (ts_state) {
+    case TS_IDLE: return true;
 
-    case TRAVEL_SETTLING: {
-      // Wait for motors to physically stop before starting the next phase.
-      // Requires both a minimum time AND near-zero wheel speeds.
-      bool time_ok = (millis() - settle_start_ms >= SETTLE_TIME_MS);
-      bool speed_ok = (fabs(speed_e0) < SETTLE_SPEED_THRESHOLD &&
-                       fabs(speed_e1) < SETTLE_SPEED_THRESHOLD);
-      if (time_ok && speed_ok) {
-        left_pid.reset();   // Fresh PID state for upcoming phase
-        right_pid.reset();
-        travel_state = settle_next_state;
+    case TS_SETTLING: {
+      bool t_ok = (millis() - settle_start >= SETTLE_TIME_MS);
+      bool s_ok = (fabs(speed_e0) < SETTLE_SPEED_THRESH &&
+                   fabs(speed_e1) < SETTLE_SPEED_THRESH);
+      if (t_ok && s_ok) {
+        left_pid.reset(); right_pid.reset();
+        ts_state = settle_next;
       }
       return false;
     }
 
-    case TRAVEL_ROTATING: {
-
-      // Calculate angle to target
-      float desired_angle = angleToPoint(target_x, target_y);
-
-      // If not yet started turning, initialize turn
-      if (!turning) {
-        setTurn(desired_angle);
-      }
-
-      // Update turn
+    case TS_ROTATING:
+      if (!nav_turning) setTurn(angleToPoint(nav_target_x, nav_target_y));
       if (checkTurn()) {
-        // Turn complete — settle before traveling
-        stopWithPID();
-        settle_start_ms = millis();
-        settle_next_state = TRAVEL_MOVING;
-        travel_state = TRAVEL_SETTLING;
-      }
-      return false;
-    }
-
-    case TRAVEL_MOVING:
-
-      // If not yet started traveling, initialize travel
-      if (!traveling) {
-        Serial.println("started traveling");
-        setTravel(target_x, target_y);
-      }
-
-      // Update travel
-      if (checkTravel()) {
-        // Travel complete
-        travel_state = TRAVEL_COMPLETE;
+        stopPID();
+        settle_start = millis();
+        settle_next = TS_MOVING;
+        ts_state = TS_SETTLING;
       }
       return false;
 
-    case TRAVEL_COMPLETE:
-      travel_state = TRAVEL_IDLE;
+    case TS_MOVING:
+      if (!nav_traveling) setTravel(nav_target_x, nav_target_y);
+      if (checkTravel()) { ts_state = TS_COMPLETE; }
+      return false;
+
+    case TS_COMPLETE:
+      ts_state = TS_IDLE;
       return true;
   }
-
   return true;
 }
 
-// put your main code here, to run repeatedly:
-void loop() {
+// =================================================================
+//  LAYER 1 — MOTOR DEAD-BAND MEASUREMENT
+// =================================================================
+void tuneLayer1() {
+  switch (l1) {
 
-  // ============================================
-  // CONTINUOUS SYSTEM UPDATES (every iteration)
-  // ============================================
-  measureSpeeds();      // Stage 3 – encoder speeds   (20 ms interval)
-  updatePID();          // Stage 4 – closed-loop motor control
-  updatePose();         // Stage 7 – dead-reckoning odometry (20 ms interval)
-  readMagnetometer();   // Stage 9 – puck detection   (100 ms interval)
+    case L1_IDLE: {
+      const char* names[] = {"Left FWD","Left REV","Right FWD","Right REV"};
+      Serial.println("=== LAYER 1: DEAD-BAND MEASUREMENT ===");
+      Serial.println("Ramps PWM 0→25 for each motor/direction.");
+      Serial.println("Note the PWM where DELTA first becomes non-zero.");
+      Serial.println();
+      Serial.print("Starting: "); Serial.println(names[l1_phase]);
+      l1_pwm = 0;
+      l1_snap0 = count_e0; l1_snap1 = count_e1;
+      l1_ts = millis();
+      l1 = L1_RAMP;
+      break;
+    }
 
-  // ============================================
-  // STAGE 6: 4-MINUTE TIMER CHECK
-  // ============================================
-  // If time is up and we're not already heading home or stopped,
-  // abandon current task and return to start immediately.
-  if ( robot_state != STATE_RETURN_HOME &&
-       robot_state != STATE_STOPPED &&
-       millis() - timer_start_ms >= TIMER_DURATION_MS ) {
-    Serial.println("*** 4-MINUTE TIMER EXPIRED — returning home ***");
-    stopWithPID();
-    travelToXY(0, 0);
-    robot_state = STATE_RETURN_HOME;
+    case L1_RAMP:
+      if (millis() - l1_ts >= 500) {
+        // Read encoder delta since last step
+        long le0, le1;
+        noInterrupts(); le0 = count_e0; le1 = count_e1; interrupts();
+
+        long delta;
+        if (l1_phase < 2) delta = abs(le1 - l1_snap1);  // left motor → e1
+        else              delta = abs(le0 - l1_snap0);  // right motor → e0
+
+        // Print result for this PWM step
+        const char* names[] = {"L_FWD","L_REV","R_FWD","R_REV"};
+        Serial.print(names[l1_phase]);
+        Serial.print(" | PWM:");
+        if (l1_pwm < 10) Serial.print(' ');
+        Serial.print(l1_pwm);
+        Serial.print(" | delta:");
+        Serial.print(delta);
+        if (delta > 0) Serial.print("  <<< MOVING");
+        Serial.println();
+
+        l1_snap0 = le0; l1_snap1 = le1;
+        l1_pwm++;
+
+        if (l1_pwm > 25) {
+          // Done with this phase
+          analogWrite(L_PWM, 0); analogWrite(R_PWM, 0);
+          l1_phase++;
+          if (l1_phase > 3) { l1 = L1_DONE; return; }
+          l1 = L1_PAUSE;
+          l1_ts = millis();
+          return;
+        }
+
+        // Apply raw PWM (bypassing dead-band compensation)
+        switch (l1_phase) {
+          case 0: digitalWrite(L_DIR, FWD); analogWrite(L_PWM, l1_pwm); break;
+          case 1: digitalWrite(L_DIR, REV); analogWrite(L_PWM, l1_pwm); break;
+          case 2: digitalWrite(R_DIR, FWD); analogWrite(R_PWM, l1_pwm); break;
+          case 3: digitalWrite(R_DIR, REV); analogWrite(R_PWM, l1_pwm); break;
+        }
+        l1_ts = millis();
+      }
+      break;
+
+    case L1_PAUSE:
+      if (millis() - l1_ts >= 1500) {
+        const char* names[] = {"Left FWD","Left REV","Right FWD","Right REV"};
+        Serial.println();
+        Serial.print("Starting: "); Serial.println(names[l1_phase]);
+        l1_pwm = 0;
+        l1_snap0 = count_e0; l1_snap1 = count_e1;
+        l1_ts = millis();
+        l1 = L1_RAMP;
+      }
+      break;
+
+    case L1_DONE:
+      Serial.println();
+      Serial.println("=== LAYER 1 COMPLETE ===");
+      Serial.println("Update dead-band defines in Motors.h:");
+      Serial.println("  L_DEADBAND_FWD, L_DEADBAND_REV");
+      Serial.println("  R_DEADBAND_FWD, R_DEADBAND_REV");
+      Serial.println("Then set TUNE_LAYER to 3 and re-upload.");
+      l1 = (L1)99; // park
+      break;
   }
+}
 
-  // ============================================
-  // STAGE 6: MAIN FINITE STATE MACHINE
-  // ============================================
-  switch (robot_state) {
+// =================================================================
+//  LAYER 3 — PID GAIN TUNING
+// =================================================================
+void tuneLayer3() {
+  switch (l3) {
 
-    // --------------------------------------------------
-    // TRAVEL_TO_WAYPOINT – navigate toward the next puck
-    // --------------------------------------------------
-    case STATE_TRAVEL_TO_WAYPOINT:
-      if (detectPuck()) {
-        // ---- PUCK FOUND: compute traverse waypoints ----
-        // Start by reversing away from the puck
-        setReverse(REVERSE_DISTANCE);
-        traverse_phase = TRAVERSE_REVERSE;
-        robot_state = STATE_TRAVERSE_PUCKED_WAYPOINT;
+    case L3_IDLE:
+      Serial.println("=== LAYER 3: PID STEP-RESPONSE TEST ===");
+      Serial.println("Open Serial Plotter (115200 baud) to see live traces.");
+      Serial.println("Phase 0: demand=0.50 c/ms (5 s)");
+      Serial.println("Phase 1: demand=0.15 c/ms (5 s)");
+      Serial.println("Phase 2: demand=-0.30 c/ms (3 s, reverse)");
+      Serial.println();
+      Serial.println("Adjust TUNE_KP / TUNE_KI / TUNE_KD at top of file,");
+      Serial.println("recompile and repeat until satisfied.");
+      Serial.println();
+      Serial.println("Press BUTTON A to run all 3 phases.");
+      l3 = (L3)10; // wait-for-button sub-state
+      break;
 
-      } else {
-        // updateTravelToXY() returns true once the waypoint is reached
-        if (updateTravelToXY()) {
-          Serial.print("Arrived at wp");
-          Serial.println(waypoint_order[current_waypoint_idx] + 1);
-          stopWithPID();
-          robot_state  = STATE_AT_WAYPOINT;
-          maneuver_ts  = millis();  // start the pause timer
-        }
+    case (L3)10: // wait for button
+      if (waitButton()) {
+        use_pid = true;
+        left_pid.reset(); right_pid.reset();
+        l3_phase = 0;
+        l3 = L3_RUN;
+        l3_ts = millis();
+        l3_print_ts = millis();
+        Serial.println("demand,left,right");
+        setDemands(l3_demands[0], l3_demands[0]);
       }
       break;
 
-    // --------------------------------------------------
-    // AT_WAYPOINT – pause, then check for puck
-    // --------------------------------------------------
-    case STATE_AT_WAYPOINT:
-      if (millis() - maneuver_ts >= WAYPOINT_PAUSE_MS) {
+    case L3_RUN: {
+      float d = l3_demands[l3_phase];
+      // Print for Serial Plotter every 20 ms
+      if (millis() - l3_print_ts >= 20) {
+        Serial.print("demand:"); Serial.print(d, 3);
+        Serial.print(",left:");  Serial.print(speed_e1, 3);
+        Serial.print(",right:"); Serial.println(speed_e0, 3);
+        l3_print_ts = millis();
+      }
+      if (millis() - l3_ts >= l3_durations[l3_phase]) {
+        stopPID();
+        l3 = L3_COAST;
+        l3_ts = millis();
+      }
+      break;
+    }
 
-        if (detectPuck()) {
-          // ---- PUCK FOUND: compute traverse waypoints ----
-          // Start by reversing away from the puck
-          setReverse(REVERSE_DISTANCE);
-          traverse_phase = TRAVERSE_REVERSE;
-          robot_state = STATE_TRAVERSE_PUCKED_WAYPOINT;
-
+    case L3_COAST:
+      if (millis() - l3_ts >= 2000) {
+        l3_phase++;
+        if (l3_phase >= 3) {
+          l3 = L3_DONE;
         } else {
-          // ---- NO PUCK: advance to next waypoint ----
-          current_waypoint_idx++;
-          if (current_waypoint_idx >= NUM_WAYPOINTS) {
-            current_waypoint_idx = 0;  // wrap and repeat the circuit
-          }
-
-          travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
-                     waypoint_y[waypoint_order[current_waypoint_idx]]);
-
-          Serial.print("Heading to wp");
-          Serial.print(waypoint_order[current_waypoint_idx] + 1);
-          Serial.print(" (");
-          Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
-          Serial.print(", ");
-          Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
-          Serial.println(")");
-
-          robot_state = STATE_TRAVEL_TO_WAYPOINT;
+          left_pid.reset(); right_pid.reset();
+          setDemands(l3_demands[l3_phase], l3_demands[l3_phase]);
+          l3_ts = millis();
+          l3_print_ts = millis();
+          l3 = L3_RUN;
         }
       }
       break;
 
-    // --------------------------------------------------
-    // TRAVERSE_PUCKED_WAYPOINT – manoeuvre around puck,
-    // position behind it on the puck→home line, then push
-    // --------------------------------------------------
-    case STATE_TRAVERSE_PUCKED_WAYPOINT:
-      switch (traverse_phase) {
+    case L3_DONE:
+      Serial.println();
+      Serial.println("=== LAYER 3 COMPLETE ===");
+      Serial.println("Look for:");
+      Serial.println("  - Fast rise to demand without large overshoot (Kp)");
+      Serial.println("  - No steady-state offset from demand line (Ki)");
+      Serial.println("  - No sustained oscillation (reduce Kp or add Kd)");
+      Serial.println();
+      Serial.println("Satisfied? Set TUNE_LAYER to 0 and re-upload.");
+      Serial.println("Press BUTTON A to repeat test.");
+      l3 = (L3)10; // back to wait-for-button
+      break;
+  }
+}
 
-        // Phase 1: reverse a fixed distance from the puck
-        case TRAVERSE_REVERSE:
-          if (checkReverse()) {
-            Serial.println("Traverse: reverse done → WP1");
-            float px = waypoint_x[waypoint_order[current_waypoint_idx]];
-            float py = waypoint_y[waypoint_order[current_waypoint_idx]];
+// =================================================================
+//  LAYER 0 — KINEMATICS CALIBRATION
+// =================================================================
+void tuneLayer0() {
+  switch (l0) {
 
-            Serial.print("PUCK DETECTED at wp");
-            Serial.println(waypoint_order[current_waypoint_idx] + 1);
-            
-            // --- Compute push position (rF) behind puck on the home→puck line ---
-            // m1 = unit vector from origin (home) toward puck
-            float m1_dist = sqrt(px * px + py * py);
-            float m1_x = px / m1_dist;
-            float m1_y = py / m1_dist;
-            // rF sits TRAVERSE_OFFSET mm beyond the puck, along the home→puck line
-            float rf_x = px + m1_x * TRAVERSE_OFFSET;
-            float rf_y = py + m1_y * TRAVERSE_OFFSET;
+    // ---------- instructions ----------
+    case L0_IDLE:
+      Serial.println("=== LAYER 0: KINEMATICS CALIBRATION ===");
+      Serial.println();
+      Serial.println("--- SUB-TEST A: LINEAR (wheel_radius) ---");
+      Serial.println("Robot drives straight for 1000 encoder counts (~288 mm).");
+      Serial.println("Measure actual distance with a ruler.");
+      Serial.println();
+      Serial.println("  Formula:  new_radius = old_radius x (measured / pose.x)");
+      Serial.println();
+      Serial.println("Place robot at a ruler's 0 mark, facing along it.");
+      Serial.println("Press BUTTON A to drive.");
+      l0 = (L0)10;
+      break;
 
-            // --- Decide whether rF is reachable directly or needs a bypass ---
-            // m2 = unit vector from robot toward puck
-            float dx_rp = px - pose.x;
-            float dy_rp = py - pose.y;
-            float rp_dist = sqrt(dx_rp * dx_rp + dy_rp * dy_rp);
-            float m2_x = dx_rp / rp_dist;
-            float m2_y = dy_rp / rp_dist;
-
-            // Compare the angle of the home→puck line with the robot→puck line.
-            // If the angular difference is large (> PI), rF is roughly "behind"
-            // the robot so it can drive there directly.  Otherwise it must
-            // swing around the puck via a perpendicular bypass waypoint.
-            float rf_angle = atan2(m1_y, m1_x);
-            float rp_angle = atan2(m2_y, m2_x);
-            float ang_diff = angleDiff(rp_angle, rf_angle);
-
-            if (fabs(ang_diff) >= PI / 2.0) {
-              // rF is roughly accessible — drive straight there
-              traverse_wp_x[0] = rf_x;
-              traverse_wp_y[0] = rf_y;
-              in_far_quadrant = false;
-            } else {
-              // rF is on the far side — first swing perpendicular to
-              // the robot→puck line to avoid pushing the puck off course.
-              // Perpendicular of m2 = (-m2_y, m2_x); choose the side
-              // that moves toward the push line (sign of ang_diff).
-              float perp_x, perp_y;
-              if (ang_diff > 0) {
-                // Swing left of the robot→puck line
-                perp_x = m2_y;
-                perp_y = -m2_x;
-              } else {
-                // Swing right of the robot→puck line
-                perp_x = -m2_y;
-                perp_y = m2_x;
-              }
-              // Bypass WP: offset perpendicular from the puck position
-              traverse_wp_x[0] = px + perp_x * TRAVERSE_OFFSET;
-              traverse_wp_y[0] = py + perp_y * TRAVERSE_OFFSET;
-
-              // Then proceed to push position behind puck
-              traverse_wp_x[1] = rf_x;
-              traverse_wp_y[1] = rf_y;
-              in_far_quadrant = true;
-            }
-            travelToXY(traverse_wp_x[0], traverse_wp_y[0]);
-            traverse_phase = TRAVERSE_WP1;
-          }
-          break;
-
-        // Phase 2: travel to first bypass waypoint
-        case TRAVERSE_WP1:
-          if (updateTravelToXY()) {
-            stopWithPID();
-            
-            Serial.println("Traverse: WP1 reached → WP2");
-            if (in_far_quadrant) {
-              travelToXY(traverse_wp_x[1], traverse_wp_y[1]);
-              traverse_phase = TRAVERSE_WP2;
-            } else {
-              travelToXY(0, 0);
-              robot_state = STATE_RETURN_HOME;
-            }
-          }
-          break;
-
-        // Phase 3: travel to second bypass waypoint
-        case TRAVERSE_WP2:
-          if (updateTravelToXY()) {
-            stopWithPID();
-            Serial.println("Traverse: WP2 reached → WP3 (push position)");
-            travelToXY(0, 0);
-            robot_state = STATE_RETURN_HOME;
-          }
-          break;
-
+    case (L0)10: // wait button → linear
+      if (waitButton()) {
+        resetPose();
+        use_pid = true;
+        left_pid.reset(); right_pid.reset();
+        noInterrupts();
+        l0_start_e0 = count_e0;
+        l0_start_e1 = count_e1;
+        interrupts();
+        setDemands(0.3, 0.3);
+        beep(660, 100);
+        l0 = L0_LIN_RUN;
       }
       break;
 
-    // --------------------------------------------------
-    // RETURN_HOME – navigate back to start using odometry
-    // --------------------------------------------------
-    case STATE_RETURN_HOME:
-      // updateTravelToXY() returns true once (0,0) is reached
+    // ---------- linear drive ----------
+    case L0_LIN_RUN: {
+      long le0, le1;
+      noInterrupts(); le0 = count_e0; le1 = count_e1; interrupts();
+      long avg = ((le0 - l0_start_e0) + (le1 - l0_start_e1)) / 2;
+      if (avg >= L0_LINEAR_TARGET_COUNTS) {
+        stopPID();
+        beep(880, 200);
+        l0 = L0_LIN_DONE;
+      }
+      break;
+    }
+
+    case L0_LIN_DONE:
+      Serial.println();
+      Serial.println("--- LINEAR RESULT ---");
+      printPose("Reported");
+      Serial.print("Current wheel_radius = ");
+      Serial.print(wheel_radius, 3); Serial.println(" mm");
+      Serial.println();
+      Serial.println("Measure actual distance with ruler, then:");
+      Serial.println("  new_radius = "); Serial.print(wheel_radius, 3);
+      Serial.println(" x (actual_mm / "); Serial.print(pose.x, 1);
+      Serial.println(")");
+      Serial.println();
+      Serial.println("Update wheel_radius in Kinematics.h, recompile,");
+      Serial.println("and repeat until pose.x matches the ruler.");
+      Serial.println();
+      Serial.println("Press BUTTON A for rotation test.");
+      l0 = L0_ROT_WAIT;
+      break;
+
+    // ---------- rotation ----------
+    case L0_ROT_WAIT:
+      if (waitButton()) {
+        Serial.println();
+        Serial.println("--- SUB-TEST B: ROTATION (wheel_sep) ---");
+        Serial.println("Robot will rotate 4 full turns (CCW).");
+        Serial.println();
+        Serial.println("  1. Place tape on floor aligned with robot front");
+        Serial.println("  2. After 4 turns, check if robot faces the tape");
+        Serial.println();
+        Serial.println("  Under-rotated → wheel_sep too SMALL → increase");
+        Serial.println("  Over-rotated  → wheel_sep too LARGE → decrease");
+        Serial.println();
+        Serial.println("  Formula: new_sep = old_sep x (4.0 / actual_turns)");
+        Serial.println("  where actual_turns = 4 + (overshoot_deg / 360)");
+        Serial.println();
+        Serial.println("Press BUTTON A to start rotation.");
+        l0 = (L0)11;
+      }
+      break;
+
+    case (L0)11: // wait button → rotate
+      if (waitButton()) {
+        resetPose();
+        use_pid = true;
+        left_pid.reset(); right_pid.reset();
+        setRotation(4.0 * 2.0 * PI);
+        beep(660, 100);
+        l0 = L0_ROT_RUN;
+      }
+      break;
+
+    case L0_ROT_RUN:
+      if (checkRotation()) {
+        stopPID();
+        beep(880, 200);
+        l0 = L0_ROT_DONE;
+      }
+      break;
+
+    case L0_ROT_DONE:
+      Serial.println();
+      Serial.println("--- ROTATION RESULT ---");
+      printPose("Reported");
+      Serial.print("Accumulated rotation = ");
+      Serial.print(rot_accumulated * 180.0 / PI, 1);
+      Serial.println("°");
+      Serial.print("Current wheel_sep = ");
+      Serial.print(wheel_sep, 3); Serial.println(" mm");
+      Serial.println();
+      Serial.println("Check: does robot face the tape mark?");
+      Serial.println("Update wheel_sep in Kinematics.h if needed.");
+      Serial.println();
+      Serial.println("Press BUTTON A for square test.");
+      l0 = L0_SQ_WAIT;
+      break;
+
+    // ---------- square test ----------
+    case L0_SQ_WAIT:
+      if (waitButton()) {
+        Serial.println();
+        Serial.println("--- SUB-TEST C: SQUARE (combined validation) ---");
+        Serial.println("Robot drives a 200 mm square and returns to start.");
+        Serial.println("Final pose should be near (0, 0, 0).");
+        Serial.println();
+        resetPose();
+        use_pid = true;
+        left_pid.reset(); right_pid.reset();
+        l0_sq_leg = 0;
+        l0_sq_started = false;
+        beep(660, 100);
+        l0 = L0_SQ_RUN;
+      }
+      break;
+
+    case L0_SQ_RUN:
+      if (!l0_sq_started) {
+        travelToXY(l0_sq_x[l0_sq_leg], l0_sq_y[l0_sq_leg]);
+        l0_sq_started = true;
+      }
       if (updateTravelToXY()) {
-        Serial.println("*** Arrived at start — puck delivered ***");
-        stopWithPID();
-
-        // If time remains, advance to the next waypoint and keep searching
-        if ( millis() - timer_start_ms < TIMER_DURATION_MS ) {
-          current_waypoint_idx++;
-          if (current_waypoint_idx >= NUM_WAYPOINTS) {
-            current_waypoint_idx = 0;  // wrap around for another sweep
-          }
-          Serial.print("Resuming search → wp");
-          Serial.println(waypoint_order[current_waypoint_idx] + 1);
-          travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
-                     waypoint_y[waypoint_order[current_waypoint_idx]]);
-          robot_state = STATE_TRAVEL_TO_WAYPOINT;
-        } else {
-          // Timer expired while returning — stay at home
-          robot_state = STATE_STOPPED;
+        Serial.print("  Corner "); Serial.print(l0_sq_leg + 1);
+        printPose(": ");
+        l0_sq_leg++;
+        l0_sq_started = false;
+        if (l0_sq_leg >= 4) {
+          stopPID();
+          beep(880, 200);
+          l0 = L0_SQ_DONE;
         }
       }
       break;
 
-    // --------------------------------------------------
-    // STOPPED – run is finished, hold motors off
-    // --------------------------------------------------
-    case STATE_STOPPED:
-      stopWithPID();
+    case L0_SQ_DONE: {
+      Serial.println();
+      Serial.println("--- SQUARE RESULT ---");
+      printPose("Final");
+      float err = sqrt(pose.x*pose.x + pose.y*pose.y);
+      Serial.print("Position error = "); Serial.print(err, 1); Serial.println(" mm");
+      Serial.print("Heading error  = "); Serial.print(pose.theta * 180.0/PI, 1);
+      Serial.println("°");
+      Serial.println();
+      Serial.println("Target: position error < 20 mm, heading error < 5°.");
+      Serial.println("If poor, re-run sub-tests A and B.");
+      Serial.println();
+      Serial.println("Press BUTTON A to restart Layer 0 tests.");
+      l0 = L0_DONE;
+      break;
+    }
+
+    case L0_DONE:
+      if (waitButton()) {
+        l0 = L0_IDLE;
+      }
       break;
   }
+}
 
-  // If you are using an OLED or LCD display,
-  // the following will update the display with
-  // the time remaining in seconds.
-  //display.timeRemaining();
+// =================================================================
+//  LAYER 4 — NAVIGATION PRIMITIVES
+// =================================================================
+void tuneLayer4() {
+  switch (l4) {
+
+    case L4_IDLE:
+      Serial.println("=== LAYER 4: NAVIGATION PRIMITIVES ===");
+      Serial.println();
+      Serial.println("Sub-test A: 4 absolute turns (90, 180, -90, 0)");
+      Serial.println("Sub-test B: 2 travel legs ((300,0) then (0,0))");
+      Serial.println("Sub-test C: 200 mm square validation");
+      Serial.println();
+      Serial.println("Press BUTTON A to start turn test.");
+      l4 = (L4)10;
+      break;
+
+    case (L4)10:
+      if (waitButton()) {
+        resetPose();
+        use_pid = true;
+        left_pid.reset(); right_pid.reset();
+        l4_step = 0;
+        l4_started = false;
+        beep(660, 100);
+        l4 = L4_TURN_RUN;
+      }
+      break;
+
+    // ---------- turn test ----------
+    case L4_TURN_RUN:
+      if (!l4_started) {
+        setTurn(l4_turns[l4_step]);
+        l4_started = true;
+        Serial.print("Turning to ");
+        Serial.print(l4_turns[l4_step] * 180.0/PI, 1);
+        Serial.println("°...");
+      }
+      if (checkTurn()) {
+        float err = angleDiff(l4_turns[l4_step], pose.theta);
+        Serial.print("  Turn "); Serial.print(l4_step + 1);
+        Serial.print(": target="); Serial.print(l4_turns[l4_step]*180.0/PI, 1);
+        Serial.print("°  actual="); Serial.print(pose.theta*180.0/PI, 1);
+        Serial.print("°  error="); Serial.print(err*180.0/PI, 2);
+        Serial.println("°");
+        l4_step++;
+        l4_started = false;
+        if (l4_step >= L4_NUM_TURNS) {
+          stopPID(); beep(880, 200);
+          l4 = L4_TURN_DONE;
+        }
+      }
+      break;
+
+    case L4_TURN_DONE:
+      Serial.println();
+      Serial.println("Turn test complete.");
+      Serial.println("Target: each turn error < 2° (0.035 rad).");
+      Serial.println("If poor: adjust TURN_GAIN, MIN_TURN_SPEED, TURN_THRESHOLD.");
+      Serial.println();
+      Serial.println("Press BUTTON A for travel test.");
+      l4 = L4_TRAV_WAIT;
+      break;
+
+    // ---------- travel test ----------
+    case L4_TRAV_WAIT:
+      if (waitButton()) {
+        resetPose();
+        left_pid.reset(); right_pid.reset();
+        l4_step = 0;
+        l4_started = false;
+        beep(660, 100);
+        l4 = L4_TRAV_RUN;
+      }
+      break;
+
+    case L4_TRAV_RUN:
+      if (!l4_started) {
+        travelToXY(l4_trav_x[l4_step], l4_trav_y[l4_step]);
+        l4_started = true;
+        Serial.print("Traveling to (");
+        Serial.print(l4_trav_x[l4_step], 0);
+        Serial.print(", ");
+        Serial.print(l4_trav_y[l4_step], 0);
+        Serial.println(")...");
+      }
+      if (updateTravelToXY()) {
+        float ex = pose.x - l4_trav_x[l4_step];
+        float ey = pose.y - l4_trav_y[l4_step];
+        float err = sqrt(ex*ex + ey*ey);
+        Serial.print("  Leg "); Serial.print(l4_step + 1);
+        printPose(": ");
+        Serial.print("  Position error = "); Serial.print(err, 1);
+        Serial.println(" mm");
+        l4_step++;
+        l4_started = false;
+        if (l4_step >= L4_NUM_TRAVS) {
+          stopPID(); beep(880, 200);
+          l4 = L4_TRAV_DONE;
+        }
+      }
+      break;
+
+    case L4_TRAV_DONE:
+      Serial.println();
+      Serial.println("Travel test complete.");
+      Serial.println("Target: arrival error < 15 mm.");
+      Serial.println("If poor: adjust TRAVEL_SPEED, HEADING_CORR_GAIN,");
+      Serial.println("         TRAVEL_DECEL_DIST, TRAVEL_THRESHOLD.");
+      Serial.println();
+      Serial.println("Press BUTTON A for square test.");
+      l4 = L4_SQ_WAIT;
+      break;
+
+    // ---------- square test ----------
+    case L4_SQ_WAIT:
+      if (waitButton()) {
+        resetPose();
+        left_pid.reset(); right_pid.reset();
+        l4_sq_leg = 0;
+        l4_sq_started = false;
+        beep(660, 100);
+        l4 = L4_SQ_RUN;
+      }
+      break;
+
+    case L4_SQ_RUN:
+      if (!l4_sq_started) {
+        travelToXY(l0_sq_x[l4_sq_leg], l0_sq_y[l4_sq_leg]);
+        l4_sq_started = true;
+      }
+      if (updateTravelToXY()) {
+        Serial.print("  Corner "); Serial.print(l4_sq_leg + 1);
+        printPose(": ");
+        l4_sq_leg++;
+        l4_sq_started = false;
+        if (l4_sq_leg >= 4) {
+          stopPID(); beep(880, 200);
+          l4 = L4_SQ_DONE;
+        }
+      }
+      break;
+
+    case L4_SQ_DONE: {
+      Serial.println();
+      Serial.println("--- SQUARE RESULT ---");
+      printPose("Final");
+      float err = sqrt(pose.x*pose.x + pose.y*pose.y);
+      Serial.print("Return error = "); Serial.print(err, 1); Serial.println(" mm");
+      Serial.println("Target: < 20 mm and < 5° heading error.");
+      Serial.println();
+      Serial.println("Press BUTTON A to restart Layer 4.");
+      l4 = L4_DONE;
+      break;
+    }
+
+    case L4_DONE:
+      if (waitButton()) l4 = L4_IDLE;
+      break;
+  }
+}
+
+// =================================================================
+//  LAYER 5 — COMPOSITE NAVIGATION & ENDURANCE
+// =================================================================
+void tuneLayer5() {
+  switch (l5) {
+
+    case L5_IDLE:
+      Serial.println("=== LAYER 5: COMPOSITE NAVIGATION ===");
+      Serial.println();
+      Serial.println("Sub-test A: Navigate all 6 waypoints + return home.");
+      Serial.println("Sub-test B: 4-minute endurance (repeated laps).");
+      Serial.println();
+      Serial.println("Press BUTTON A to start waypoint circuit.");
+      l5 = (L5)10;
+      break;
+
+    case (L5)10:
+      if (waitButton()) {
+        resetPose();
+        use_pid = true;
+        left_pid.reset(); right_pid.reset();
+        l5_wp = 0;
+        l5_started = false;
+        l5_start_ms = millis();
+        beep(660, 100);
+        Serial.println("--- WAYPOINT CIRCUIT ---");
+        l5 = L5_CIRCUIT;
+      }
+      break;
+
+    // ---------- waypoint circuit ----------
+    case L5_CIRCUIT:
+      if (!l5_started) {
+        if (l5_wp < L5_NUM_WP) {
+          travelToXY(l5_x[l5_wp], l5_y[l5_wp]);
+          Serial.print("  → WP"); Serial.print(l5_wp + 1);
+          Serial.print(" ("); Serial.print(l5_x[l5_wp], 0);
+          Serial.print(", "); Serial.print(l5_y[l5_wp], 0);
+          Serial.println(")");
+        } else {
+          // Return home
+          travelToXY(0, 0);
+          Serial.println("  → HOME (0, 0)");
+        }
+        l5_started = true;
+      }
+      if (updateTravelToXY()) {
+        if (l5_wp < L5_NUM_WP) {
+          float ex = pose.x - l5_x[l5_wp];
+          float ey = pose.y - l5_y[l5_wp];
+          float err = sqrt(ex*ex + ey*ey);
+          Serial.print("    Arrived. err="); Serial.print(err, 1);
+          Serial.print("mm ");
+          printPose("");
+        }
+        l5_wp++;
+        l5_started = false;
+        if (l5_wp > L5_NUM_WP) { // all WPs + home done
+          stopPID(); beep(880, 200);
+          l5 = L5_CIRCUIT_DONE;
+        }
+      }
+      break;
+
+    case L5_CIRCUIT_DONE: {
+      unsigned long elapsed = millis() - l5_start_ms;
+      Serial.println();
+      Serial.println("--- CIRCUIT RESULT ---");
+      printPose("Final");
+      float err = sqrt(pose.x*pose.x + pose.y*pose.y);
+      Serial.print("Home error = "); Serial.print(err, 1); Serial.println(" mm");
+      Serial.print("Circuit time = "); Serial.print(elapsed / 1000);
+      Serial.println(" s");
+      Serial.println();
+      Serial.println("Target: home error < 30 mm, time < 60 s.");
+      Serial.println();
+      Serial.println("Press BUTTON A for 4-minute endurance test.");
+      l5 = L5_ENDURANCE_WAIT;
+      break;
+    }
+
+    // ---------- endurance ----------
+    case L5_ENDURANCE_WAIT:
+      if (waitButton()) {
+        resetPose();
+        left_pid.reset(); right_pid.reset();
+        l5_wp = 0;
+        l5_started = false;
+        l5_start_ms = millis();
+        l5_print_ts = millis();
+        l5_lap = 0;
+        beep(660, 100);
+        Serial.println("--- 4-MINUTE ENDURANCE TEST ---");
+        Serial.println("Printing pose every 30 seconds.");
+        Serial.println();
+        l5 = L5_ENDURANCE;
+      }
+      break;
+
+    case L5_ENDURANCE: {
+      unsigned long elapsed = millis() - l5_start_ms;
+
+      // Periodic pose print
+      if (millis() - l5_print_ts >= 30000) {
+        Serial.print("["); Serial.print(elapsed / 1000); Serial.print("s] ");
+        Serial.print("Lap "); Serial.print(l5_lap);
+        printPose("  ");
+        l5_print_ts = millis();
+      }
+
+      // Timer expired → go home
+      if (elapsed >= L5_ENDURANCE_MS) {
+        Serial.println("*** 4 MINUTES — returning home ***");
+        travelToXY(0, 0);
+        l5_started = true;
+        l5 = L5_ENDURANCE_DONE;
+        break;
+      }
+
+      // Navigate waypoints in a loop
+      if (!l5_started) {
+        travelToXY(l5_x[l5_wp], l5_y[l5_wp]);
+        l5_started = true;
+      }
+      if (updateTravelToXY()) {
+        l5_wp++;
+        l5_started = false;
+        if (l5_wp >= L5_NUM_WP) {
+          l5_wp = 0;
+          l5_lap++;
+          // Return home between laps
+          travelToXY(0, 0);
+          l5_started = true;
+        }
+      }
+      break;
+    }
+
+    case L5_ENDURANCE_DONE:
+      if (updateTravelToXY()) {
+        stopPID(); beep(880, 400);
+        Serial.println();
+        Serial.println("--- ENDURANCE RESULT ---");
+        printPose("Final");
+        float err = sqrt(pose.x*pose.x + pose.y*pose.y);
+        Serial.print("Home error  = "); Serial.print(err, 1); Serial.println(" mm");
+        Serial.print("Laps done   = "); Serial.println(l5_lap);
+        unsigned long total = millis() - l5_start_ms;
+        Serial.print("Total time  = "); Serial.print(total / 1000); Serial.println(" s");
+        Serial.println();
+        Serial.println("Target: home error < 30 mm after full 4 minutes.");
+        Serial.println("If drift is large, re-calibrate Layer 0 (kinematics).");
+        Serial.println();
+        Serial.println("Press BUTTON A to restart Layer 5.");
+        l5 = L5_DONE;
+      }
+      break;
+
+    case L5_DONE:
+      if (waitButton()) l5 = L5_IDLE;
+      break;
+  }
+}
+
+// =================================================================
+//  LOOP
+// =================================================================
+void loop() {
+  // Always measure speeds and update pose
+  measureSpeeds();
+  updatePose();
+
+  // Only run PID for layers that need it
+  if (TUNE_LAYER != 1) updatePID();
+
+  switch (TUNE_LAYER) {
+    case 1: tuneLayer1(); break;
+    case 3: tuneLayer3(); break;
+    case 0: tuneLayer0(); break;
+    case 4: tuneLayer4(); break;
+    case 5: tuneLayer5(); break;
+  }
 }
