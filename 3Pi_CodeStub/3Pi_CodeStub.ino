@@ -128,7 +128,7 @@ PID_c right_pid;  // PID controller for right motor
 
 // Speed measurement timing
 unsigned long speed_measurement_ts = 0;
-#define SPEED_MEASUREMENT_INTERVAL 5  // Measure speed every 20ms
+#define SPEED_MEASUREMENT_INTERVAL 5  // Measure speed every 5ms
 
 // Previous encoder counts (for calculating change over time)
 long prev_count_e0 = 0;
@@ -145,7 +145,7 @@ float speed_e1 = 0.0;  // LEFT wheel speed (encoder 1)
 
 // PID update timing
 unsigned long pid_update_ts = 0;
-#define PID_UPDATE_INTERVAL 5  // Update PID every 10ms
+#define PID_UPDATE_INTERVAL 5  // Update PID every 5ms
 
 // Speed demands (in counts per millisecond)
 float demand_speed_left = 0.0;
@@ -201,14 +201,17 @@ bool mag_ok = false;
 
 // Pose update timing (should match speed measurement interval)
 unsigned long pose_update_ts = 0;
-#define POSE_UPDATE_INTERVAL 5  // Update pose every 20ms (matches speed measurement interval)
+#define POSE_UPDATE_INTERVAL 5  // Update pose every 5ms (matches speed measurement interval)
 
 // Turn behavior variables
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
 #define TURN_THRESHOLD 0.01        // Stop turning when within ±0.01 radians (~0.6°)
-#define TURN_GAIN 5                // Proportional gain for turning (adjust based on testing)
+#define TURN_GAIN 5.0              // Proportional gain for turning — gives smooth deceleration
+                                   // over ~0.1 rad (5.7°) before stopping. Old value of 100
+                                   // caused bang-bang: full speed until threshold then instant stop.
 #define MAX_TURN_SPEED 0.5         // Maximum turn speed (counts/ms) - adjust based on testing
+#define MIN_TURN_SPEED 0.15        // Minimum turn speed to overcome motor dead-band (~PWM 15)
 
 // Relative rotation variables (rotate BY an amount, not TO a heading)
 float rotate_target = 0.0;        // Total radians to rotate (positive = CCW)
@@ -226,15 +229,24 @@ bool traveling = false;            // Is robot currently traveling?
 #define TRAVEL_THRESHOLD 10.0      // Stop when within 10mm of target
 #define TRAVEL_SPEED 0.5           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
 #define HEADING_CORRECTION_GAIN 0.1  // Gain for heading correction during travel
+#define TRAVEL_DECEL_DISTANCE 50.0 // Start decelerating within 50mm of target (mm)
+#define MIN_TRAVEL_SPEED 0.15      // Minimum forward speed to overcome motor dead-band
 
 // Combined travelToXY behavior
 enum TravelState {
   TRAVEL_IDLE,       // Not traveling
+  TRAVEL_SETTLING,   // Waiting for motors to stop before next phase
   TRAVEL_ROTATING,   // Initial rotation to face target
   TRAVEL_MOVING,     // Moving toward target
   TRAVEL_COMPLETE    // Reached target
 };
 TravelState travel_state = TRAVEL_IDLE;
+
+// Settling: wait for motors to physically stop between movement phases
+#define SETTLE_TIME_MS 50            // Minimum settling wait (ms)
+#define SETTLE_SPEED_THRESHOLD 0.02  // Speed below this = stopped (counts/ms)
+unsigned long settle_start_ms = 0;
+TravelState settle_next_state = TRAVEL_ROTATING;  // State to enter after settling
 
 // ============================================
 // STAGE 6: FSM STATES & TIMER
@@ -692,19 +704,27 @@ bool detectPuck() {
 // This is non-blocking and should be called regularly from loop()
 void measureSpeeds() {
 
-  // Check if it's time to measure speed (every 20ms)
+  // Check if it's time to measure speed
   unsigned long current_time = millis();
   unsigned long elapsed_time = current_time - speed_measurement_ts;
 
   if (elapsed_time >= SPEED_MEASUREMENT_INTERVAL) {
 
+    // Atomic read: disable interrupts while copying volatile
+    // encoder counts (4-byte long is not atomic on 8-bit AVR)
+    long local_e0, local_e1;
+    noInterrupts();
+    local_e0 = count_e0;
+    local_e1 = count_e1;
+    interrupts();
+
     // Calculate change in encoder counts since last measurement
-    long delta_e0 = count_e0 - prev_count_e0;
-    long delta_e1 = count_e1 - prev_count_e1;
+    long delta_e0 = local_e0 - prev_count_e0;
+    long delta_e1 = local_e1 - prev_count_e1;
 
     // Save current counts for next measurement
-    prev_count_e0 = count_e0;
-    prev_count_e1 = count_e1;
+    prev_count_e0 = local_e0;
+    prev_count_e1 = local_e1;
 
     // Calculate speed as counts per millisecond
     // Typecast to float for precision
@@ -761,17 +781,17 @@ void updatePID() {
       //   count_e0 / speed_e0 = RIGHT wheel
       //   count_e1 / speed_e1 = LEFT wheel
       if (demand_speed_left == 0.0) {
-        // If demand is zero, stop motor and reset PID to prevent windup
         left_pwm_output = 0.0;
+        left_pid.reset();  // Clear stale integral to prevent jump on resume
       } else {
-      left_pwm_output = left_pid.update(demand_speed_left, speed_e1);   // Use e1 for left motor
+        left_pwm_output = left_pid.update(demand_speed_left, speed_e1);
       }
       // Update right motor PID
       if (demand_speed_right == 0.0) {
-        // If demand is zero, stop motor and reset PID to prevent windup
         right_pwm_output = 0.0;
+        right_pid.reset();  // Clear stale integral to prevent jump on resume
       } else {
-      right_pwm_output = right_pid.update(demand_speed_right, speed_e0); // Use e0 for right motor
+        right_pwm_output = right_pid.update(demand_speed_right, speed_e0);
       }
       // Apply PID outputs to motors
       motors.setPWM(left_pwm_output, right_pwm_output);
@@ -838,6 +858,7 @@ void setDemandSpeed(float speed) {
  */
 void stopWithPID() {
   setDemandSpeeds(0.0, 0.0);
+  motors.setPWM(0, 0);  // Zero PWM directly for immediate stop
   left_pid.reset();
   right_pid.reset();
 }
@@ -1036,24 +1057,20 @@ bool checkTurn() {
 
   // Check if turn is complete
   if (abs(angle_error) < TURN_THRESHOLD) {
-    // Stop motors
-    if (use_pid_control) {
-      setDemandSpeeds(0.0, 0.0);
-      left_pid.reset();
-      right_pid.reset();
-    } else {
-      motors.setPWM(0, 0);
-    }
+    stopWithPID();
     turning = false;
     return true;  // Turn complete
   }
 
   // Calculate turn speed proportional to error
-
   float turn_speed = angle_error * TURN_GAIN;
   // Constrain turn speed to maximum allowed value
   if (turn_speed > MAX_TURN_SPEED) turn_speed = MAX_TURN_SPEED;
   if (turn_speed < -MAX_TURN_SPEED) turn_speed = -MAX_TURN_SPEED;
+  // Floor at minimum speed to overcome motor dead-band
+  if (fabs(turn_speed) < MIN_TURN_SPEED) {
+    turn_speed = (angle_error > 0) ? MIN_TURN_SPEED : -MIN_TURN_SPEED;
+  }
 
   // Apply turn speeds (opposite directions for rotation on spot)
   if (use_pid_control) {
@@ -1115,13 +1132,7 @@ bool checkRotation() {
 
   // Check if rotation is complete
   if (abs(remaining) < TURN_THRESHOLD) {
-    if (use_pid_control) {
-      setDemandSpeeds(0.0, 0.0);
-      left_pid.reset();
-      right_pid.reset();
-    } else {
-      motors.setPWM(0, 0);
-    }
+    stopWithPID();
     rotating = false;
     return true;
   }
@@ -1130,6 +1141,10 @@ bool checkRotation() {
   float turn_speed = remaining * TURN_GAIN;
   if (turn_speed > MAX_TURN_SPEED) turn_speed = MAX_TURN_SPEED;
   if (turn_speed < -MAX_TURN_SPEED) turn_speed = -MAX_TURN_SPEED;
+  // Floor at minimum speed to overcome motor dead-band
+  if (fabs(turn_speed) < MIN_TURN_SPEED) {
+    turn_speed = (remaining > 0) ? MIN_TURN_SPEED : -MIN_TURN_SPEED;
+  }
 
   if (use_pid_control) {
     setDemandSpeeds(-turn_speed, turn_speed);
@@ -1178,13 +1193,7 @@ bool checkReverse() {
 
   // Check if target distance reached
   if (dist_traveled >= reverse_target_dist) {
-    if (use_pid_control) {
-      setDemandSpeeds(0.0, 0.0);
-      left_pid.reset();
-      right_pid.reset();
-    } else {
-      motors.setPWM(0, 0);
-    }
+    stopWithPID();
     reversing_dist = false;
     return true;
   }
@@ -1235,14 +1244,7 @@ bool checkTravel() {
   float distance_traveled = distanceToPoint(init_x, init_y);
   // Check if travel is complete
   if (distance < TRAVEL_THRESHOLD || distance_traveled >= target_init_dist) {
-    // Stop motors
-    if (use_pid_control) {
-      setDemandSpeeds(0.0, 0.0);
-      left_pid.reset();
-      right_pid.reset();
-    } else {
-      motors.setPWM(0, 0);
-    }
+    stopWithPID();
     traveling = false;
     return true;  // Travel complete
   }
@@ -1253,8 +1255,12 @@ bool checkTravel() {
   // Calculate heading error
   float heading_error = angleDiff(desired_heading, pose.theta);
 
-  // Calculate base forward speed
+  // Calculate base forward speed with deceleration near target
   float forward_speed = TRAVEL_SPEED;
+  if (distance < TRAVEL_DECEL_DISTANCE) {
+    forward_speed = TRAVEL_SPEED * (distance / TRAVEL_DECEL_DISTANCE);
+    if (forward_speed < MIN_TRAVEL_SPEED) forward_speed = MIN_TRAVEL_SPEED;
+  }
 
   // Calculate heading correction
   float heading_correction = heading_error * HEADING_CORRECTION_GAIN;
@@ -1302,13 +1308,11 @@ void travelToXY(float x, float y) {
   target_x = x;
   target_y = y;
 
-  // Reset PID controllers so that stale ms_last_t from any
-  // preceding idle period does not cause a huge dt (and thus
-  // a massive integral spike) on the first update() call.
-  left_pid.reset();
-  right_pid.reset();
-
-  travel_state = TRAVEL_ROTATING;  // Start with rotation phase
+  // Stop motors and reset PIDs before settling
+  stopWithPID();
+  settle_start_ms = millis();
+  settle_next_state = TRAVEL_ROTATING;
+  travel_state = TRAVEL_SETTLING;
 }
 
 /*
@@ -1323,6 +1327,20 @@ bool updateTravelToXY() {
       // Not navigating
       return true;
 
+    case TRAVEL_SETTLING: {
+      // Wait for motors to physically stop before starting the next phase.
+      // Requires both a minimum time AND near-zero wheel speeds.
+      bool time_ok = (millis() - settle_start_ms >= SETTLE_TIME_MS);
+      bool speed_ok = (fabs(speed_e0) < SETTLE_SPEED_THRESHOLD &&
+                       fabs(speed_e1) < SETTLE_SPEED_THRESHOLD);
+      if (time_ok && speed_ok) {
+        left_pid.reset();   // Fresh PID state for upcoming phase
+        right_pid.reset();
+        travel_state = settle_next_state;
+      }
+      return false;
+    }
+
     case TRAVEL_ROTATING: {
 
       // Calculate angle to target
@@ -1335,8 +1353,11 @@ bool updateTravelToXY() {
 
       // Update turn
       if (checkTurn()) {
-        // Turn complete, start traveling
-        travel_state = TRAVEL_MOVING;
+        // Turn complete — settle before traveling
+        stopWithPID();
+        settle_start_ms = millis();
+        settle_next_state = TRAVEL_MOVING;
+        travel_state = TRAVEL_SETTLING;
       }
       return false;
     }
