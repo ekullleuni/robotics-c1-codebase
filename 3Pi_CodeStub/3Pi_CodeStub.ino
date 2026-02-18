@@ -128,7 +128,7 @@ PID_c right_pid;  // PID controller for right motor
 
 // Speed measurement timing
 unsigned long speed_measurement_ts = 0;
-#define SPEED_MEASUREMENT_INTERVAL 5  // Measure speed every 5ms
+#define SPEED_MEASUREMENT_INTERVAL 20  // Measure speed every 5ms
 
 // Previous encoder counts (for calculating change over time)
 long prev_count_e0 = 0;
@@ -145,7 +145,7 @@ float speed_e1 = 0.0;  // LEFT wheel speed (encoder 1)
 
 // PID update timing
 unsigned long pid_update_ts = 0;
-#define PID_UPDATE_INTERVAL 5  // Update PID every 5ms
+#define PID_UPDATE_INTERVAL 20  // Update PID every 5ms
 
 // Speed demands (in counts per millisecond)
 float demand_speed_left = 0.0;
@@ -187,7 +187,7 @@ unsigned long mag_read_ts = 0;
 //   2. Move puck toward sensor and note the value where
 //      you want detection to trigger
 //   3. Set PUCK_MAGNITUDE_THRESHOLD to that value
-#define PUCK_MAGNITUDE_THRESHOLD 1.8
+#define PUCK_MAGNITUDE_THRESHOLD 2.0
 
 // Latest magnitude reading (updated by readMagnetometer())
 float mag_magnitude = 0.0;
@@ -201,13 +201,13 @@ bool mag_ok = false;
 
 // Pose update timing (should match speed measurement interval)
 unsigned long pose_update_ts = 0;
-#define POSE_UPDATE_INTERVAL 5  // Update pose every 5ms (matches speed measurement interval)
+#define POSE_UPDATE_INTERVAL 10  // Update pose every 5ms (matches speed measurement interval)
 
 // Turn behavior variables
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
-#define TURN_THRESHOLD 0.01        // Stop turning when within ±0.01 radians (~0.6°)
-#define TURN_GAIN 5.0              // Proportional gain for turning — gives smooth deceleration
+#define TURN_THRESHOLD 0.005        // Stop turning when within ±0.01 radians (~0.6°)
+#define TURN_GAIN 3.0              // Proportional gain for turning — gives smooth deceleration
                                    // over ~0.1 rad (5.7°) before stopping. Old value of 100
                                    // caused bang-bang: full speed until threshold then instant stop.
 #define MAX_TURN_SPEED 0.5         // Maximum turn speed (counts/ms) - adjust based on testing
@@ -227,9 +227,9 @@ float init_y = 0.0;                // Starting Y coordinate for travel (mm)
 float target_init_dist = 0.0;       // Distance to target (mm)
 bool traveling = false;            // Is robot currently traveling?
 #define TRAVEL_THRESHOLD 10.0      // Stop when within 10mm of target
-#define TRAVEL_SPEED 0.5           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
-#define HEADING_CORRECTION_GAIN 0.1  // Gain for heading correction during travel
-#define TRAVEL_DECEL_DISTANCE 50.0 // Start decelerating within 50mm of target (mm)
+#define TRAVEL_SPEED 0.55           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
+#define HEADING_CORRECTION_GAIN 1.0  // Gain for heading correction during travel
+#define TRAVEL_DECEL_DISTANCE 10.0 // Start decelerating within 50mm of target (mm)
 #define MIN_TRAVEL_SPEED 0.15      // Minimum forward speed to overcome motor dead-band
 
 // Combined travelToXY behavior
@@ -258,9 +258,13 @@ enum RobotState {
   STATE_AT_WAYPOINT,              // Arrived – brief pause, check for puck
   STATE_TRAVERSE_PUCKED_WAYPOINT, // Manoeuvring around detected puck
   STATE_RETURN_HOME,              // Navigating back to start (0,0), pushing puck if present
-  STATE_STOPPED                   // Arrived home, run complete
+  STATE_STOPPED,
+  STATE_WAITING,                   // Arrived home, run complete
 };
 RobotState robot_state = STATE_TRAVEL_TO_WAYPOINT;
+
+unsigned long waiting_ts = 0;
+#define WAITING_DURATION_MS 4000  // Time to wait at home before restarting search (optional)
 
 // ============================================
 // STAGE 10: PUCK TRAVERSE SUB-PHASES
@@ -288,7 +292,7 @@ float traverse_wp_y[2];
 // WP1 = (puck_x - LATERAL, puck_y - FORWARD)
 // WP2 = (puck_x + LATERAL, puck_y - FORWARD)
 // Tune these on the physical robot.
-#define TRAVERSE_OFFSET 200.0
+#define TRAVERSE_OFFSET 170.0
 
 // How far behind the puck (away from home) to place WP3 (mm)
 
@@ -343,7 +347,7 @@ int current_waypoint_idx = 0;
 
 // How long (ms) to pause at each waypoint before moving on.
 // Leaves time for future puck-detection (Stage 9).
-#define WAYPOINT_PAUSE_MS 1000
+#define WAYPOINT_PAUSE_MS 50
 
 // The setup() function runs only once when the
 // robot is powered up (either by plugging in
@@ -399,27 +403,6 @@ void setup() {
   // display.setMaxMinutes(4);
   // display.startStopwatch();
 
-  // ============================================
-  // WAIT FOR BUTTON A PRESS TO START
-  // ============================================
-  // All hardware is now initialised. Wait here
-  // so you can position the robot on the
-  // calibration disk before anything moves.
-  Serial.println();
-  Serial.println("=================================");
-  Serial.println("  Press BUTTON A to start robot");
-  Serial.println("=================================");
-
-  while (digitalRead(BUTTON_A_PIN) != LOW) {
-    // Wait for button press
-  }
-  // Debounce: wait for button release
-  delay(50);
-  while (digitalRead(BUTTON_A_PIN) == LOW) {}
-  delay(50);
-
-  tone(BUZZER_PIN, 440, 100);  // Short beep to confirm start
-  Serial.println("*** ROBOT STARTED ***");
 
   // ============================================
   // STAGE 3: Initialize speed measurement
@@ -446,8 +429,8 @@ void setup() {
   // These are initial guesses and MUST be tuned physically
   // NOTE: Kp must be large because speed is in counts/ms (small values)
   //       but PWM needs to be 20-255 (large values)
-  float initial_Kp = 40.0;  // Start with proportional control only
-  float initial_Ki = 0.8;    // Integral term disabled initially
+  float initial_Kp = 48.0;  // Start with proportional control only
+  float initial_Ki = 0.5;    // Integral term disabled initially
   float initial_Kd = 0.0;    // Derivative term disabled initially
 
   // Initialize left motor PID
@@ -504,6 +487,28 @@ void setup() {
   } else {
     Serial.println("WARNING: Magnetometer NOT found! Puck detection disabled.");
   }
+  // ============================================
+  // WAIT FOR BUTTON A PRESS TO START
+  // ============================================
+  // All hardware is now initialised. Wait here
+  // so you can position the robot on the
+  // calibration disk before anything moves.
+  Serial.println();
+  Serial.println("=================================");
+  Serial.println("  Press BUTTON A to start robot");
+  Serial.println("=================================");
+
+  while (digitalRead(BUTTON_A_PIN) != LOW) {
+    // Wait for button press
+  }
+  // Debounce: wait for button release
+  delay(50);
+  while (digitalRead(BUTTON_A_PIN) == LOW) {}
+  delay(50);
+
+  tone(BUZZER_PIN, 440, 100);  // Short beep to confirm start
+  Serial.println("*** ROBOT STARTED ***");
+
 
   // Re-initialise pose AFTER calibration spins so rotation
   // does not corrupt the starting odometry.
@@ -514,11 +519,6 @@ void setup() {
   // ============================================
   // Capture starting timestamp for pose updates
   pose_update_ts = millis();
-
-  Serial.println("Stage 7: Kinematics initialized");
-  Serial.println("  Call pose.update() every 20ms for odometry");
-  Serial.println("  Navigation functions: setTurn(), checkTurn(), travelToXY()");
-  Serial.println("  IMPORTANT: Calibrate wheel_radius and wheel_sep in Kinematics.h");
 
   // ============================================
   // STAGE 6: Start FSM & Timer
@@ -1243,7 +1243,7 @@ bool checkTravel() {
   float distance = distanceToPoint(target_x, target_y);
   float distance_traveled = distanceToPoint(init_x, init_y);
   // Check if travel is complete
-  if (distance < TRAVEL_THRESHOLD || distance_traveled >= target_init_dist) {
+  if (distance < TRAVEL_THRESHOLD) {
     stopWithPID();
     traveling = false;
     return true;  // Travel complete
@@ -1266,8 +1266,8 @@ bool checkTravel() {
   float heading_correction = heading_error * HEADING_CORRECTION_GAIN;
 
   // Apply differential speeds for heading correction
-  float left_speed = forward_speed + heading_correction;
-  float right_speed = forward_speed - heading_correction;
+  float left_speed = forward_speed - heading_correction;
+  float right_speed = forward_speed + heading_correction;
 
   if (use_pid_control) {
     setDemandSpeeds(left_speed, right_speed);
@@ -1401,13 +1401,10 @@ void loop() {
   // ============================================
   // If time is up and we're not already heading home or stopped,
   // abandon current task and return to start immediately.
-  if ( robot_state != STATE_RETURN_HOME &&
-       robot_state != STATE_STOPPED &&
-       millis() - timer_start_ms >= TIMER_DURATION_MS ) {
-    Serial.println("*** 4-MINUTE TIMER EXPIRED — returning home ***");
+  if (millis() - timer_start_ms >= TIMER_DURATION_MS ) {
+    Serial.println("*** 4-MINUTE TIMER EXPIRED — STOPPING ***");
     stopWithPID();
-    travelToXY(0, 0);
-    robot_state = STATE_RETURN_HOME;
+    robot_state = STATE_STOPPED;
   }
 
   // ============================================
@@ -1587,32 +1584,29 @@ void loop() {
       if (updateTravelToXY()) {
         Serial.println("*** Arrived at start — puck delivered ***");
         stopWithPID();
-
-        // If time remains, advance to the next waypoint and keep searching
-        if ( millis() - timer_start_ms < TIMER_DURATION_MS ) {
-          current_waypoint_idx++;
-          if (current_waypoint_idx >= NUM_WAYPOINTS) {
-            current_waypoint_idx = 0;  // wrap around for another sweep
-          }
-          Serial.print("Resuming search → wp");
-          Serial.println(waypoint_order[current_waypoint_idx] + 1);
-          travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
-                     waypoint_y[waypoint_order[current_waypoint_idx]]);
-          robot_state = STATE_TRAVEL_TO_WAYPOINT;
-        } else {
-          // Timer expired while returning — stay at home
-          robot_state = STATE_STOPPED;
-        }
+        // Timer expired while returning — stay at home
+        robot_state = STATE_WAITING;
+        waiting_ts = millis();  // start waiting timer (optional, for display)
       }
       break;
-
+    
+    case STATE_WAITING:
+      if (millis() - waiting_ts >= WAITING_DURATION_MS) {
+        current_waypoint_idx = 0;
+        Serial.println("Resuming search → wp1");
+        travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
+                   waypoint_y[waypoint_order[current_waypoint_idx]]);
+        robot_state = STATE_TRAVEL_TO_WAYPOINT;
+      }
+      break;
     // --------------------------------------------------
     // STOPPED – run is finished, hold motors off
     // --------------------------------------------------
     case STATE_STOPPED:
       stopWithPID();
       break;
-  }
+
+  } // end switch (robot_state)
 
   // If you are using an OLED or LCD display,
   // the following will update the display with
