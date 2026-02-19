@@ -71,8 +71,8 @@
 
 // Uncomment the next two lines if you will use
 // the BLUE display with 1 row of pins.
-//#include "oled.h"
-//OLED_c display(1, 30, 0, 17, 13);
+#include "oled.h"
+OLED_c display(1, 30, 0, 17, 13);
 
 
 // Used for Labsheet 0. Defines which pin the buzzer
@@ -206,8 +206,8 @@ unsigned long pose_update_ts = 0;
 // Turn behavior variables
 float target_angle = 0.0;         // Target orientation (radians)
 bool turning = false;              // Is robot currently turning?
-#define TURN_THRESHOLD 0.005        // Stop turning when within ±0.01 radians (~0.6°)
-#define TURN_GAIN 3.0              // Proportional gain for turning — gives smooth deceleration
+#define TURN_THRESHOLD 0.01        // Stop turning when within ±0.01 radians (~0.6°)
+#define TURN_GAIN 5.0              // Proportional gain for turning — gives smooth deceleration
                                    // over ~0.1 rad (5.7°) before stopping. Old value of 100
                                    // caused bang-bang: full speed until threshold then instant stop.
 #define MAX_TURN_SPEED 0.5         // Maximum turn speed (counts/ms) - adjust based on testing
@@ -254,6 +254,7 @@ TravelState settle_next_state = TRAVEL_ROTATING;  // State to enter after settli
 
 // Robot behaviour states
 enum RobotState {
+  STATE_CALIBRATING_MAGNETOMETER, // Calibrate magnetometer (3 rotations)
   STATE_TRAVEL_TO_WAYPOINT,       // Navigating to the current puck waypoint
   STATE_AT_WAYPOINT,              // Arrived – brief pause, check for puck
   STATE_TRAVERSE_PUCKED_WAYPOINT, // Manoeuvring around detected puck
@@ -261,7 +262,7 @@ enum RobotState {
   STATE_STOPPED,
   STATE_WAITING,                   // Arrived home, run complete
 };
-RobotState robot_state = STATE_TRAVEL_TO_WAYPOINT;
+RobotState robot_state = STATE_CALIBRATING_MAGNETOMETER;
 
 unsigned long waiting_ts = 0;
 #define WAITING_DURATION_MS 4000  // Time to wait at home before restarting search (optional)
@@ -283,6 +284,14 @@ TraversePhase traverse_phase;
 // relative to the robot's approach, requiring an extra bypass WP.
 // Set during TRAVERSE_REVERSE, read during TRAVERSE_WP1.
 bool in_far_quadrant = false;
+
+// ============================================
+// STAGE 9: MAGNETOMETER CALIBRATION STATE
+// ============================================
+bool mag_calibration_in_progress = false;
+unsigned long mag_calibration_last_read = 0;
+unsigned long post_calibration_grace_end = 0;  // Disable puck detection until sensor settles
+#define POST_CALIBRATION_GRACE_MS 2000         // 2-second grace period after calibration
 
 // Computed traverse waypoints (max 2: bypass + push position)
 float traverse_wp_x[2];
@@ -397,13 +406,6 @@ void setup() {
   delay(2000);
   Serial.println(" *** READY *** ");
 
-  // If you are using an OLED or LCD display,
-  // the following will set up a count down
-  // timer to be displayed.
-  // display.setMaxMinutes(4);
-  // display.startStopwatch();
-
-
   // ============================================
   // STAGE 3: Initialize speed measurement
   // ============================================
@@ -417,8 +419,6 @@ void setup() {
 
   // Capture starting timestamp
   speed_measurement_ts = millis();
-
-  Serial.println("Stage 3: Speed measurement initialized");
 
   // ============================================
   // STAGE 4: Initialize PID Controllers
@@ -450,17 +450,15 @@ void setup() {
   // Capture starting timestamp for PID updates
   pid_update_ts = millis();
 
-  Serial.println("Stage 4: PID controllers initialized");
-  Serial.print("  Kp=");
-  Serial.print(initial_Kp);
-  Serial.print(", Ki=");
-  Serial.print(initial_Ki);
-  Serial.print(", Kd=");
-  Serial.println(initial_Kd);
-  Serial.println("  NOTE: Kp is large because speed units (counts/ms) are small");
-  Serial.println("  PID control: DISABLED (use_pid_control=false)");
-  Serial.println("  To enable: set use_pid_control=true in code");
-
+  // ============================================
+  // STAGE 6: Initialize OLED Display Timer
+  // ============================================
+  // Start the timer BEFORE magnetometer calibration so the 4-minute
+  // countdown doesn't include calibration time.
+  display.reset();          // Initialize OLED display (with USB interrupt protection)
+  display.setMaxMinutes(4); // Set timer for 4 minutes
+  display.startStopwatch(); // Start the countdown
+  timer_start_ms = millis(); // Record timer start for 4-minute check in loop()
   // ============================================
   // STAGE 5: Line Sensor Calibration
   // ============================================
@@ -476,14 +474,14 @@ void setup() {
   //Serial.println("Stage 5: Line sensors initialized");
 
   // ============================================
-  // STAGE 9: Initialize & Calibrate Magnetometer
+  // STAGE 9: Initialize Magnetometer (calibration deferred to FSM)
   // ============================================
-  // Must happen BEFORE the pose reinit so the calibration
-  // spin is not counted in the starting odometry.
+  // Initialize the magnetometer hardware.
+  // Actual calibration will happen in STATE_CALIBRATING_MAGNETOMETER.
   mag_ok = magnetometer.initialise();
   if ( mag_ok ) {
     Serial.println("Stage 9: Magnetometer found on I2C bus");
-    calibrateMagnetometer();
+    Serial.println("  Calibration will occur in STATE_CALIBRATING_MAGNETOMETER");
   } else {
     Serial.println("WARNING: Magnetometer NOT found! Puck detection disabled.");
   }
@@ -493,26 +491,26 @@ void setup() {
   // All hardware is now initialised. Wait here
   // so you can position the robot on the
   // calibration disk before anything moves.
-  Serial.println();
-  Serial.println("=================================");
-  Serial.println("  Press BUTTON A to start robot");
-  Serial.println("=================================");
+  // Serial.println();
+  // Serial.println("=================================");
+  // Serial.println("  Press BUTTON A to start robot");
+  // Serial.println("=================================");
 
-  while (digitalRead(BUTTON_A_PIN) != LOW) {
-    // Wait for button press
-  }
-  // Debounce: wait for button release
-  delay(50);
-  while (digitalRead(BUTTON_A_PIN) == LOW) {}
-  delay(50);
+  // while (digitalRead(BUTTON_A_PIN) != LOW) {
+  //   // Wait for button press
+  // }
+  // // Debounce: wait for button release
+  // delay(50);
+  // while (digitalRead(BUTTON_A_PIN) == LOW) {}
+  // delay(50);
 
-  tone(BUZZER_PIN, 440, 100);  // Short beep to confirm start
-  Serial.println("*** ROBOT STARTED ***");
+  // tone(BUZZER_PIN, 440, 100);  // Short beep to confirm start
+  // Serial.println("*** ROBOT STARTED ***");
 
 
   // Re-initialise pose AFTER calibration spins so rotation
   // does not corrupt the starting odometry.
-  pose.initialise(0, 0, 0);
+  //pose.initialise(0, 0, 0);
 
   // ============================================
   // STAGE 7: Initialize Kinematics
@@ -529,11 +527,9 @@ void setup() {
   // Enable PID closed-loop speed control for all driving
   use_pid_control = true;
 
-  // Start the 4-minute countdown.  Placed last so the
-  // calibration spin (3 s) does not count against the run.
-  timer_start_ms = millis();
-
-  travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
+  // FSM will start in STATE_CALIBRATING_MAGNETOMETER and proceed to
+  // STATE_TRAVEL_TO_WAYPOINT once calibration is complete.
+  // Don't call travelToXY() here — the FSM handles it.
 }
 
 // ============================================
@@ -695,7 +691,13 @@ void readMagnetometer() {
 // PUCK_MAGNITUDE_THRESHOLD.  Safe to call every loop
 // iteration; it uses the cached mag_magnitude updated
 // by readMagnetometer().
+// Returns false during the post-calibration grace period
+// to allow magnetometer to settle.
 bool detectPuck() {
+  // Disable detection during grace period after calibration
+  if (millis() < post_calibration_grace_end) {
+    return false;
+  }
   return ( mag_magnitude > PUCK_MAGNITUDE_THRESHOLD );
 }
 
@@ -840,7 +842,7 @@ void updatePID() {
  */
 void setDemandSpeeds(float left_speed, float right_speed) {
   demand_speed_left = left_speed;
-  demand_speed_right = right_speed;
+  demand_speed_right = 0.88*right_speed;
 }
 
 /*
@@ -1048,7 +1050,6 @@ void setTurn(float angle) {
  */
 bool checkTurn() {
   if (!turning) {
-    Serial.println("finished turning");
     return true;  // Not turning, return complete
   }
 
@@ -1366,7 +1367,6 @@ bool updateTravelToXY() {
 
       // If not yet started traveling, initialize travel
       if (!traveling) {
-        Serial.println("started traveling");
         setTravel(target_x, target_y);
       }
 
@@ -1413,6 +1413,62 @@ void loop() {
   switch (robot_state) {
 
     // --------------------------------------------------
+    // CALIBRATING_MAGNETOMETER – spin 3 rotations collecting min/max
+    // --------------------------------------------------
+    case STATE_CALIBRATING_MAGNETOMETER:
+      if (!mag_ok) {
+        // Magnetometer not available, skip calibration
+        Serial.println("Magnetometer not available, skipping calibration");
+        robot_state = STATE_TRAVEL_TO_WAYPOINT;
+        travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
+      } else if (!mag_calibration_in_progress) {
+        // Start calibration: reset and begin 3-rotation spin
+        magnetometer.resetCalibration();
+
+        // Setup PID for controlled rotation
+        bool pid_was_enabled = use_pid_control;
+        use_pid_control = true;
+        left_pid.reset();
+        right_pid.reset();
+
+        // Set target: 3 full CCW revolutions = 6*PI radians
+        setRotation(3.0 * 2.0 * PI);
+        mag_calibration_in_progress = true;
+        mag_calibration_last_read = 0;
+      } else {
+        // Calibration in progress: pump system updates + rotation + mag reads
+        measureSpeeds();
+        updatePID();
+        updatePose();
+
+        // Read magnetometer every 100ms (sensor timing limit)
+        if (millis() - mag_calibration_last_read >= 100) {
+          magnetometer.updateCalibration();
+          mag_calibration_last_read = millis();
+        }
+
+        // Check if rotation complete
+        if (checkRotation()) {
+          // Rotation done, finalize calibration
+          stopWithPID();
+          magnetometer.finalizeCalibration();
+
+          // Re-initialize pose after calibration spin
+          pose.initialise(0, 0, 0);
+          pose_update_ts = millis();
+
+          // Start grace period: disable puck detection until magnetometer settles
+          post_calibration_grace_end = millis() + POST_CALIBRATION_GRACE_MS;
+
+          // Move to next state: travel to first waypoint
+          mag_calibration_in_progress = false;
+          robot_state = STATE_TRAVEL_TO_WAYPOINT;
+          travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
+        }
+      }
+      break;
+
+    // --------------------------------------------------
     // TRAVEL_TO_WAYPOINT – navigate toward the next puck
     // --------------------------------------------------
     case STATE_TRAVEL_TO_WAYPOINT:
@@ -1426,8 +1482,6 @@ void loop() {
       } else {
         // updateTravelToXY() returns true once the waypoint is reached
         if (updateTravelToXY()) {
-          Serial.print("Arrived at wp");
-          Serial.println(waypoint_order[current_waypoint_idx] + 1);
           stopWithPID();
           robot_state  = STATE_AT_WAYPOINT;
           maneuver_ts  = millis();  // start the pause timer
@@ -1452,19 +1506,14 @@ void loop() {
           // ---- NO PUCK: advance to next waypoint ----
           current_waypoint_idx++;
           if (current_waypoint_idx >= NUM_WAYPOINTS) {
+            travelToXY(0, 0);
+            robot_state = STATE_RETURN_HOME;
             current_waypoint_idx = 0;  // wrap and repeat the circuit
+            break;
           }
 
           travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
                      waypoint_y[waypoint_order[current_waypoint_idx]]);
-
-          Serial.print("Heading to wp");
-          Serial.print(waypoint_order[current_waypoint_idx] + 1);
-          Serial.print(" (");
-          Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
-          Serial.print(", ");
-          Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
-          Serial.println(")");
 
           robot_state = STATE_TRAVEL_TO_WAYPOINT;
         }
@@ -1481,13 +1530,9 @@ void loop() {
         // Phase 1: reverse a fixed distance from the puck
         case TRAVERSE_REVERSE:
           if (checkReverse()) {
-            Serial.println("Traverse: reverse done → WP1");
             float px = waypoint_x[waypoint_order[current_waypoint_idx]];
             float py = waypoint_y[waypoint_order[current_waypoint_idx]];
 
-            Serial.print("PUCK DETECTED at wp");
-            Serial.println(waypoint_order[current_waypoint_idx] + 1);
-            
             // --- Compute push position (rF) behind puck on the home→puck line ---
             // m1 = unit vector from origin (home) toward puck
             float m1_dist = sqrt(px * px + py * py);
@@ -1551,13 +1596,11 @@ void loop() {
         case TRAVERSE_WP1:
           if (updateTravelToXY()) {
             stopWithPID();
-            
-            Serial.println("Traverse: WP1 reached → WP2");
             if (in_far_quadrant) {
               travelToXY(traverse_wp_x[1], traverse_wp_y[1]);
               traverse_phase = TRAVERSE_WP2;
             } else {
-              travelToXY(0, 0);
+              travelToXY(40, 10);
               robot_state = STATE_RETURN_HOME;
             }
           }
@@ -1567,8 +1610,7 @@ void loop() {
         case TRAVERSE_WP2:
           if (updateTravelToXY()) {
             stopWithPID();
-            Serial.println("Traverse: WP2 reached → WP3 (push position)");
-            travelToXY(0, 0);
+            travelToXY(40, 10);
             robot_state = STATE_RETURN_HOME;
           }
           break;
@@ -1582,7 +1624,6 @@ void loop() {
     case STATE_RETURN_HOME:
       // updateTravelToXY() returns true once (0,0) is reached
       if (updateTravelToXY()) {
-        Serial.println("*** Arrived at start — puck delivered ***");
         stopWithPID();
         // Timer expired while returning — stay at home
         robot_state = STATE_WAITING;
@@ -1593,7 +1634,6 @@ void loop() {
     case STATE_WAITING:
       if (millis() - waiting_ts >= WAITING_DURATION_MS) {
         current_waypoint_idx = 0;
-        Serial.println("Resuming search → wp1");
         travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
                    waypoint_y[waypoint_order[current_waypoint_idx]]);
         robot_state = STATE_TRAVEL_TO_WAYPOINT;
@@ -1611,5 +1651,5 @@ void loop() {
   // If you are using an OLED or LCD display,
   // the following will update the display with
   // the time remaining in seconds.
-  //display.timeRemaining();
+  display.timeRemaining();
 }
