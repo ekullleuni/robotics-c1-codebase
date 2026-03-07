@@ -409,7 +409,10 @@ void setup() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -440,7 +443,10 @@ void setup() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -481,6 +487,7 @@ void setup() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   // ============================================
   // STAGE 6: Initialize OLED Display Timer
   // ============================================
@@ -491,6 +498,8 @@ void setup() {
   display.startStopwatch(); // Start the countdown
   timer_start_ms = millis(); // Record timer start for 4-minute check in loop()
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -531,9 +540,12 @@ void setup() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     Serial.println("Stage 9: Magnetometer found on I2C bus");
     Serial.println("  Calibration will occur in STATE_CALIBRATING_MAGNETOMETER");
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -589,10 +601,13 @@ void setup() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   // FSM will start in STATE_CALIBRATING_MAGNETOMETER and proceed to
   // STATE_TRAVEL_TO_WAYPOINT once calibration is complete.
   // Don't call travelToXY() here — the FSM handles it.
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -1129,6 +1144,10 @@ bool checkTurn() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+=======
+    Serial.println(F("finished turning"));
+>>>>>>> Stashed changes
 =======
     Serial.println(F("finished turning"));
 >>>>>>> Stashed changes
@@ -1458,6 +1477,10 @@ bool updateTravelToXY() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+=======
+        Serial.println(F("started traveling"));
+>>>>>>> Stashed changes
 =======
         Serial.println(F("started traveling"));
 >>>>>>> Stashed changes
@@ -1585,7 +1608,10 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -1629,7 +1655,10 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 =======
@@ -1661,6 +1690,7 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
             float px = waypoint_x[waypoint_order[current_waypoint_idx]];
             float py = waypoint_y[waypoint_order[current_waypoint_idx]];
 
@@ -1669,6 +1699,12 @@ void loop() {
             float px = waypoint_x[waypoint_order[current_waypoint_idx]];
             float py = waypoint_y[waypoint_order[current_waypoint_idx]];
 
+=======
+            Serial.println(F("Traverse: reverse done → WP1"));
+            float px = waypoint_x[waypoint_order[current_waypoint_idx]];
+            float py = waypoint_y[waypoint_order[current_waypoint_idx]];
+
+>>>>>>> Stashed changes
 =======
             Serial.println(F("Traverse: reverse done → WP1"));
             float px = waypoint_x[waypoint_order[current_waypoint_idx]];
@@ -1754,6 +1790,9 @@ void loop() {
             Serial.println(F("Traverse: WP1 reached → WP2"));
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
@@ -1766,7 +1805,11 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
               travelToXY(40, 10);
+=======
+              travelToXY(35, 35);
+>>>>>>> Stashed changes
 =======
               travelToXY(35, 35);
 >>>>>>> Stashed changes
@@ -1788,7 +1831,12 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
             travelToXY(40, 10);
+=======
+            Serial.println(F("Traverse: WP2 reached → WP3 (push position)"));
+            travelToXY(35, 35);
+>>>>>>> Stashed changes
 =======
             Serial.println(F("Traverse: WP2 reached → WP3 (push position)"));
             travelToXY(35, 35);
@@ -1817,6 +1865,10 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+=======
+        Serial.println(F("*** Arrived at start — puck delivered ***"));
+>>>>>>> Stashed changes
 =======
         Serial.println(F("*** Arrived at start — puck delivered ***"));
 >>>>>>> Stashed changes
@@ -1839,6 +1891,10 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+=======
+        Serial.println(F("Resuming search → wp1"));
+>>>>>>> Stashed changes
 =======
         Serial.println(F("Resuming search → wp1"));
 >>>>>>> Stashed changes
@@ -1865,9 +1921,13 @@ void loop() {
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   // If you are using an OLED or LCD display,
   // the following will update the display with
   // the time remaining in seconds.
+=======
+  // Update OLED countdown (non-blocking: only redraws once per second).
+>>>>>>> Stashed changes
 =======
   // Update OLED countdown (non-blocking: only redraws once per second).
 >>>>>>> Stashed changes
