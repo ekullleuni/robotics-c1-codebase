@@ -65,7 +65,7 @@
 // Measured 28 Jan 2026; re-measure if motors/gears change.
 #define L_DEADBAND_FWD 13   // Left motor forward dead-band
 #define L_DEADBAND_REV 11   // Left motor reverse dead-band
-#define R_DEADBAND_FWD 9   // Right motor forward dead-band
+#define R_DEADBAND_FWD 10   // Right motor forward dead-band
 #define R_DEADBAND_REV 10   // Right motor reverse dead-band
 
 // Class to operate the motors.

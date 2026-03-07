@@ -229,7 +229,7 @@ bool traveling = false;            // Is robot currently traveling?
 #define TRAVEL_THRESHOLD 10.0      // Stop when within 10mm of target
 #define TRAVEL_SPEED 0.55           // Base forward speed (counts/ms) - increased from 0.3 to overcome dead-band (PWM ~15)
 #define HEADING_CORRECTION_GAIN 1.0  // Gain for heading correction during travel
-#define TRAVEL_DECEL_DISTANCE 10.0 // Start decelerating within 50mm of target (mm)
+#define TRAVEL_DECEL_DISTANCE 20.0 // Start decelerating within 50mm of target (mm)
 #define MIN_TRAVEL_SPEED 0.15      // Minimum forward speed to overcome motor dead-band
 
 // Combined travelToXY behavior
@@ -404,8 +404,19 @@ void setup() {
   // established.
   Serial.begin(9600);
   delay(2000);
-  Serial.println(" *** READY *** ");
+  Serial.println(F(" *** READY *** "));
 
+<<<<<<< Updated upstream
+=======
+  // Explicitly initialise the OLED now that Serial (USB CDC) is up.
+  // display.reset() disables USB interrupts around the SPI init sequence,
+  // preventing the bit-banged SPI from being corrupted by USB ISRs.
+  // Without this, the Display-ON command (0xAF) often never arrives
+  // correctly and the screen stays blank.
+  display.reset();
+
+
+>>>>>>> Stashed changes
   // ============================================
   // STAGE 3: Initialize speed measurement
   // ============================================
@@ -420,6 +431,11 @@ void setup() {
   // Capture starting timestamp
   speed_measurement_ts = millis();
 
+<<<<<<< Updated upstream
+=======
+  Serial.println(F("Stage 3: Speed measurement initialized"));
+
+>>>>>>> Stashed changes
   // ============================================
   // STAGE 4: Initialize PID Controllers
   // ============================================
@@ -450,6 +466,7 @@ void setup() {
   // Capture starting timestamp for PID updates
   pid_update_ts = millis();
 
+<<<<<<< Updated upstream
   // ============================================
   // STAGE 6: Initialize OLED Display Timer
   // ============================================
@@ -459,6 +476,19 @@ void setup() {
   display.setMaxMinutes(4); // Set timer for 4 minutes
   display.startStopwatch(); // Start the countdown
   timer_start_ms = millis(); // Record timer start for 4-minute check in loop()
+=======
+  Serial.println(F("Stage 4: PID controllers initialized"));
+  Serial.print(F("  Kp="));
+  Serial.print(initial_Kp);
+  Serial.print(F(", Ki="));
+  Serial.print(initial_Ki);
+  Serial.print(F(", Kd="));
+  Serial.println(initial_Kd);
+  Serial.println(F("  NOTE: Kp is large because speed units (counts/ms) are small"));
+  Serial.println(F("  PID control: DISABLED (use_pid_control=false)"));
+  Serial.println(F("  To enable: set use_pid_control=true in code"));
+
+>>>>>>> Stashed changes
   // ============================================
   // STAGE 5: Line Sensor Calibration
   // ============================================
@@ -480,10 +510,15 @@ void setup() {
   // Actual calibration will happen in STATE_CALIBRATING_MAGNETOMETER.
   mag_ok = magnetometer.initialise();
   if ( mag_ok ) {
+<<<<<<< Updated upstream
     Serial.println("Stage 9: Magnetometer found on I2C bus");
     Serial.println("  Calibration will occur in STATE_CALIBRATING_MAGNETOMETER");
+=======
+    Serial.println(F("Stage 9: Magnetometer found on I2C bus"));
+    calibrateMagnetometer();
+>>>>>>> Stashed changes
   } else {
-    Serial.println("WARNING: Magnetometer NOT found! Puck detection disabled.");
+    Serial.println(F("WARNING: Magnetometer NOT found! Puck detection disabled."));
   }
   // ============================================
   // WAIT FOR BUTTON A PRESS TO START
@@ -527,9 +562,20 @@ void setup() {
   // Enable PID closed-loop speed control for all driving
   use_pid_control = true;
 
+<<<<<<< Updated upstream
   // FSM will start in STATE_CALIBRATING_MAGNETOMETER and proceed to
   // STATE_TRAVEL_TO_WAYPOINT once calibration is complete.
   // Don't call travelToXY() here — the FSM handles it.
+=======
+  // Start the 4-minute countdown HERE — after ALL calibration — so
+  // magnetometer calibration time does not eat into the run budget.
+  // Both the FSM timer and OLED stopwatch start at this exact moment.
+  timer_start_ms = millis();
+  display.setMaxMinutes(4);
+  display.startStopwatch();
+
+  travelToXY(waypoint_x[waypoint_order[0]], waypoint_y[waypoint_order[0]]);
+>>>>>>> Stashed changes
 }
 
 // ============================================
@@ -540,8 +586,8 @@ void setup() {
 // Call this once at startup with robot on calibration disk.
 void calibrateLineSensors() {
 
-  Serial.println("Starting line sensor calibration...");
-  Serial.println("Robot will rotate for 3 seconds.");
+  Serial.println(F("Starting line sensor calibration..."));
+  Serial.println(F("Robot will rotate for 3 seconds."));
 
   // Reset calibration to prepare for new values
   line_sensors.resetCalibration();
@@ -573,16 +619,16 @@ void calibrateLineSensors() {
   line_sensors_calibrated = true;
 
   // Report calibration results
-  Serial.println("Calibration complete!");
-  Serial.println("Sensor calibration values:");
+  Serial.println(F("Calibration complete!"));
+  Serial.println(F("Sensor calibration values:"));
   for (int i = 0; i < NUM_SENSORS; i++) {
-    Serial.print("  Sensor ");
+    Serial.print(F("  Sensor "));
     Serial.print(i);
-    Serial.print(": min=");
+    Serial.print(F(": min="));
     Serial.print(line_sensors.minimum[i]);
-    Serial.print(", max=");
+    Serial.print(F(", max="));
     Serial.print(line_sensors.maximum[i]);
-    Serial.print(", range=");
+    Serial.print(F(", range="));
     Serial.println(line_sensors.scaling[i]);
   }
 
@@ -606,8 +652,8 @@ void calibrateLineSensors() {
 // (table legs, laptops, phones) before running.
 void calibrateMagnetometer() {
 
-  Serial.println("Starting magnetometer calibration...");
-  Serial.println("Robot will rotate 3 full turns (PID-controlled).");
+  Serial.println(F("Starting magnetometer calibration..."));
+  Serial.println(F("Robot will rotate 3 full turns (PID-controlled)."));
 
   magnetometer.resetCalibration();
 
@@ -645,17 +691,17 @@ void calibrateMagnetometer() {
   magnetometer.finalizeCalibration();
 
   // Report calibration results
-  Serial.println("Magnetometer calibration complete!");
+  Serial.println(F("Magnetometer calibration complete!"));
   for ( int i = 0; i < MAG_AXIS; i++ ) {
-    Serial.print("  Axis ");
+    Serial.print(F("  Axis "));
     Serial.print(i);
-    Serial.print(": min=");
+    Serial.print(F(": min="));
     Serial.print(magnetometer.minimum[i], 0);
-    Serial.print(", max=");
+    Serial.print(F(", max="));
     Serial.print(magnetometer.maximum[i], 0);
-    Serial.print(", offset=");
+    Serial.print(F(", offset="));
     Serial.print(magnetometer.offset[i], 1);
-    Serial.print(", scaling=");
+    Serial.print(F(", scaling="));
     Serial.println(magnetometer.scaling[i], 1);
   }
 
@@ -679,7 +725,7 @@ void readMagnetometer() {
 
     // TEMPORARY: print magnitude for threshold calibration
     // Remove this once PUCK_MAGNITUDE_THRESHOLD is set
-    Serial.print("MAG:");
+    Serial.print(F("MAG:"));
     Serial.println(mag_magnitude, 3);
   }
 }
@@ -941,17 +987,17 @@ byte getLineSensorPattern() {
 void printLineSensorReadings() {
   if (line_sensors_calibrated) {
     line_sensors.calcCalibratedADC();
-    Serial.print("Cal: ");
+    Serial.print(F("Cal: "));
     for (int i = 0; i < NUM_SENSORS; i++) {
       Serial.print(line_sensors.calibrated[i], 2);
-      if (i < NUM_SENSORS - 1) Serial.print(", ");
+      if (i < NUM_SENSORS - 1) Serial.print(F(", "));
     }
   } else {
     line_sensors.readSensorsADC();
-    Serial.print("Raw: ");
+    Serial.print(F("Raw: "));
     for (int i = 0; i < NUM_SENSORS; i++) {
       Serial.print(line_sensors.readings[i], 0);
-      if (i < NUM_SENSORS - 1) Serial.print(", ");
+      if (i < NUM_SENSORS - 1) Serial.print(F(", "));
     }
   }
   Serial.println();
@@ -1050,6 +1096,10 @@ void setTurn(float angle) {
  */
 bool checkTurn() {
   if (!turning) {
+<<<<<<< Updated upstream
+=======
+    Serial.println(F("finished turning"));
+>>>>>>> Stashed changes
     return true;  // Not turning, return complete
   }
 
@@ -1367,6 +1417,10 @@ bool updateTravelToXY() {
 
       // If not yet started traveling, initialize travel
       if (!traveling) {
+<<<<<<< Updated upstream
+=======
+        Serial.println(F("started traveling"));
+>>>>>>> Stashed changes
         setTravel(target_x, target_y);
       }
 
@@ -1402,7 +1456,7 @@ void loop() {
   // If time is up and we're not already heading home or stopped,
   // abandon current task and return to start immediately.
   if (millis() - timer_start_ms >= TIMER_DURATION_MS ) {
-    Serial.println("*** 4-MINUTE TIMER EXPIRED — STOPPING ***");
+    Serial.println(F("*** 4-MINUTE TIMER EXPIRED — STOPPING ***"));
     stopWithPID();
     robot_state = STATE_STOPPED;
   }
@@ -1482,6 +1536,11 @@ void loop() {
       } else {
         // updateTravelToXY() returns true once the waypoint is reached
         if (updateTravelToXY()) {
+<<<<<<< Updated upstream
+=======
+          Serial.print(F("Arrived at wp"));
+          Serial.println(waypoint_order[current_waypoint_idx] + 1);
+>>>>>>> Stashed changes
           stopWithPID();
           robot_state  = STATE_AT_WAYPOINT;
           maneuver_ts  = millis();  // start the pause timer
@@ -1515,6 +1574,17 @@ void loop() {
           travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
                      waypoint_y[waypoint_order[current_waypoint_idx]]);
 
+<<<<<<< Updated upstream
+=======
+          Serial.print(F("Heading to wp"));
+          Serial.print(waypoint_order[current_waypoint_idx] + 1);
+          Serial.print(F(" ("));
+          Serial.print(waypoint_x[waypoint_order[current_waypoint_idx]]);
+          Serial.print(F(", "));
+          Serial.print(waypoint_y[waypoint_order[current_waypoint_idx]]);
+          Serial.println(F(")"));
+
+>>>>>>> Stashed changes
           robot_state = STATE_TRAVEL_TO_WAYPOINT;
         }
       }
@@ -1530,9 +1600,19 @@ void loop() {
         // Phase 1: reverse a fixed distance from the puck
         case TRAVERSE_REVERSE:
           if (checkReverse()) {
+<<<<<<< Updated upstream
             float px = waypoint_x[waypoint_order[current_waypoint_idx]];
             float py = waypoint_y[waypoint_order[current_waypoint_idx]];
 
+=======
+            Serial.println(F("Traverse: reverse done → WP1"));
+            float px = waypoint_x[waypoint_order[current_waypoint_idx]];
+            float py = waypoint_y[waypoint_order[current_waypoint_idx]];
+
+            Serial.print(F("PUCK DETECTED at wp"));
+            Serial.println(waypoint_order[current_waypoint_idx] + 1);
+            
+>>>>>>> Stashed changes
             // --- Compute push position (rF) behind puck on the home→puck line ---
             // m1 = unit vector from origin (home) toward puck
             float m1_dist = sqrt(px * px + py * py);
@@ -1596,11 +1676,20 @@ void loop() {
         case TRAVERSE_WP1:
           if (updateTravelToXY()) {
             stopWithPID();
+<<<<<<< Updated upstream
+=======
+            
+            Serial.println(F("Traverse: WP1 reached → WP2"));
+>>>>>>> Stashed changes
             if (in_far_quadrant) {
               travelToXY(traverse_wp_x[1], traverse_wp_y[1]);
               traverse_phase = TRAVERSE_WP2;
             } else {
+<<<<<<< Updated upstream
               travelToXY(40, 10);
+=======
+              travelToXY(35, 35);
+>>>>>>> Stashed changes
               robot_state = STATE_RETURN_HOME;
             }
           }
@@ -1610,7 +1699,12 @@ void loop() {
         case TRAVERSE_WP2:
           if (updateTravelToXY()) {
             stopWithPID();
+<<<<<<< Updated upstream
             travelToXY(40, 10);
+=======
+            Serial.println(F("Traverse: WP2 reached → WP3 (push position)"));
+            travelToXY(35, 35);
+>>>>>>> Stashed changes
             robot_state = STATE_RETURN_HOME;
           }
           break;
@@ -1624,6 +1718,10 @@ void loop() {
     case STATE_RETURN_HOME:
       // updateTravelToXY() returns true once (0,0) is reached
       if (updateTravelToXY()) {
+<<<<<<< Updated upstream
+=======
+        Serial.println(F("*** Arrived at start — puck delivered ***"));
+>>>>>>> Stashed changes
         stopWithPID();
         // Timer expired while returning — stay at home
         robot_state = STATE_WAITING;
@@ -1634,6 +1732,10 @@ void loop() {
     case STATE_WAITING:
       if (millis() - waiting_ts >= WAITING_DURATION_MS) {
         current_waypoint_idx = 0;
+<<<<<<< Updated upstream
+=======
+        Serial.println(F("Resuming search → wp1"));
+>>>>>>> Stashed changes
         travelToXY(waypoint_x[waypoint_order[current_waypoint_idx]],
                    waypoint_y[waypoint_order[current_waypoint_idx]]);
         robot_state = STATE_TRAVEL_TO_WAYPOINT;
@@ -1648,8 +1750,12 @@ void loop() {
 
   } // end switch (robot_state)
 
+<<<<<<< Updated upstream
   // If you are using an OLED or LCD display,
   // the following will update the display with
   // the time remaining in seconds.
+=======
+  // Update OLED countdown (non-blocking: only redraws once per second).
+>>>>>>> Stashed changes
   display.timeRemaining();
 }

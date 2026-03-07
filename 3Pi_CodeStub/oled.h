@@ -36,30 +36,35 @@ class OLED_c: public PololuSH1106 {
     }
 
     bool timeRemaining() {
-      unsigned long now;
-      now = millis();
+      unsigned long now = millis();
 
       if (now - display_ts > 1000 ) {
         display_ts = millis();
 
-        //disableUSB();
-        this->clear();
+        disableUSB();         // Prevent USB ISR corrupting bit-banged SPI
+        this->noAutoDisplay(); // Buffer all writes; push to screen in one transfer
+        this->clear();         // Wipe text buffer (no SPI yet)
 
         if ( now < end_ts ) {
-          unsigned long dt = end_ts - now;
-          dt /= 1000;
-
+          unsigned long dt = (end_ts - now) / 1000;  // seconds remaining
+          this->gotoXY(0, 0);
+          this->print("Sec:");  // label on top row
           this->gotoXY(0, 1);
-          this->print(dt);
-		  //enableUSB();
-		  return true;
+          this->print(dt);      // countdown number on bottom row
+          this->display();      // single SPI transfer for complete screen
+          enableUSB();
+          return true;
         } else {
+          this->gotoXY(0, 0);
+          this->print("Done");
           this->gotoXY(0, 1);
-          this->print("- Done -");
-		  //enableUSB();
-		  return false;
+          this->print("- End -");
+          this->display();
+          enableUSB();
+          return false;
         }
       }
+      return true;  // timer still running; display not due for refresh yet
     }
   private:
 
