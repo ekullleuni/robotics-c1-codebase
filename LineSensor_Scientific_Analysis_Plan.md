@@ -7,7 +7,7 @@
 3. **Assess ambient light sensitivity**: Measure how different lighting conditions shift the absolute readings
 4. **Extract the transfer function**: Derive a mathematical model (likely logarithmic/exponential) relating printed shade to sensor reading
 5. **Evaluate gradient resolution**: Determine the minimum grayscale step the sensor can reliably distinguish
-6. **Inform map design**: Use the response curve to optimise gradient slopes for maximum positional accuracy
+6. **Inform map design**: the response curve to optimise gradient slopes for maximum positional accuracy
 
 ---
 

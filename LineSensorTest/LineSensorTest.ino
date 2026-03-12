@@ -36,6 +36,7 @@
 #include "LineSensors.h"
 #include "Encoders.h"
 #include "Kinematics.h"
+#include "SpeedMeasurement.h"  // countsToMM() for encoder → distance conversion
 
 // ============================================
 // PIN DEFINITIONS
@@ -421,7 +422,7 @@ void loop() {
         Serial.println(F("# Press B to start logging, B again to stop."));
         Serial.println(F("# Press A when done to skip to Phase 3."));
         Serial.println(F("#"));
-        Serial.println(F("# HEADER: gradient_id, timestamp_ms, enc_left, enc_right, s0, s1, s2, s3, s4"));
+        Serial.println(F("# HEADER: gradient_id, timestamp_ms, dist_left_mm, dist_right_mm, s0, s1, s2, s3, s4"));
         tone(BUZZER_PIN, 880, 100);
         break;
       }
@@ -474,7 +475,7 @@ void loop() {
           Serial.println(F("# Press B to start logging, B again to stop."));
           Serial.println(F("# Press A when done to skip to Phase 3."));
           Serial.println(F("#"));
-          Serial.println(F("# HEADER: gradient_id, timestamp_ms, enc_left, enc_right, s0, s1, s2, s3, s4"));
+          Serial.println(F("# HEADER: gradient_id, timestamp_ms, dist_left_mm, dist_right_mm, s0, s1, s2, s3, s4"));
           tone(BUZZER_PIN, 880, 200);
         } else {
           tone(BUZZER_PIN, 440, 100);
@@ -551,21 +552,24 @@ void loop() {
         // Read sensors
         line_sensors.readSensorsADC();
 
-        // Read encoder counts for position
+        // Read encoder counts and convert to distance (mm) from strip start
+        // e1 = LEFT wheel, e0 = RIGHT wheel (Encoders.h mapping)
         long e0, e1;
         noInterrupts();
         e0 = count_e0;
         e1 = count_e1;
         interrupts();
+        float dist_left_mm  = countsToMM(e1);  // LEFT distance (mm)
+        float dist_right_mm = countsToMM(e0);  // RIGHT distance (mm)
 
-        // Output: gradient_id, timestamp_ms, enc_left, enc_right, s0-s4
+        // Output: gradient_id, timestamp_ms, dist_left_mm, dist_right_mm, s0-s4
         Serial.print(gradient_id);
         Serial.print(F(","));
         Serial.print(millis());
         Serial.print(F(","));
-        Serial.print(e1);  // e1 = LEFT encoder
+        Serial.print(dist_left_mm, 2);
         Serial.print(F(","));
-        Serial.print(e0);  // e0 = RIGHT encoder
+        Serial.print(dist_right_mm, 2);
         Serial.print(F(","));
         printSensorCSV();
         Serial.println();
