@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.0.dtd" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" width="907.0800" height="907.0800" viewBox="0 0 907.0800 907.0800" version="1.1" id="svg_gradient" inkscape:document-units="mm">
+  <sodipodi:namedview id="namedview1" pagecolor="#ffffff" bordercolor="#666666" borderopacity="1.0" inkscape:pageopacity="0.0" inkscape:pageshadow="2" inkscape:document-units="mm" showgrid="false" units="mm" />
+  <defs>
+    <radialGradient id="optimisedGradient" cx="50%" cy="50%" r="50%" fx="50%" fy="50%" gradientUnits="objectBoundingBox">
+      <stop offset="0.000000" style="stop-color:#000000;stop-opacity:1" id="stop_0" inkscape:label="shade_0_r0.0mm" />
+      <stop offset="0.041667" style="stop-color:#0b0b0b;stop-opacity:1" id="stop_1" inkscape:label="shade_1_r4.2mm" />
+      <stop offset="0.083333" style="stop-color:#151515;stop-opacity:1" id="stop_2" inkscape:label="shade_2_r8.3mm" />
+      <stop offset="0.125000" style="stop-color:#202020;stop-opacity:1" id="stop_3" inkscape:label="shade_3_r12.5mm" />
+      <stop offset="0.166667" style="stop-color:#2a2a2a;stop-opacity:1" id="stop_4" inkscape:label="shade_4_r16.7mm" />
+      <stop offset="0.208333" style="stop-color:#353535;stop-opacity:1" id="stop_5" inkscape:label="shade_5_r20.8mm" />
+      <stop offset="0.250000" style="stop-color:#404040;stop-opacity:1" id="stop_6" inkscape:label="shade_6_r25.0mm" />
+      <stop offset="0.291667" style="stop-color:#4a4a4a;stop-opacity:1" id="stop_7" inkscape:label="shade_7_r29.2mm" />
+      <stop offset="0.333333" style="stop-color:#555555;stop-opacity:1" id="stop_8" inkscape:label="shade_8_r33.3mm" />
+      <stop offset="0.375000" style="stop-color:#606060;stop-opacity:1" id="stop_9" inkscape:label="shade_9_r37.5mm" />
+      <stop offset="0.416667" style="stop-color:#6a6a6a;stop-opacity:1" id="stop_10" inkscape:label="shade_10_r41.7mm" />
+      <stop offset="0.458333" style="stop-color:#757575;stop-opacity:1" id="stop_11" inkscape:label="shade_11_r45.8mm" />
+      <stop offset="0.500000" style="stop-color:#808080;stop-opacity:1" id="stop_12" inkscape:label="shade_12_r50.0mm" />
+      <stop offset="0.541667" style="stop-color:#8a8a8a;stop-opacity:1" id="stop_13" inkscape:label="shade_13_r54.2mm" />
+      <stop offset="0.583333" style="stop-color:#959595;stop-opacity:1" id="stop_14" inkscape:label="shade_14_r58.3mm" />
+      <stop offset="0.625000" style="stop-color:#9f9f9f;stop-opacity:1" id="stop_15" inkscape:label="shade_15_r62.5mm" />
+      <stop offset="0.666667" style="stop-color:#aaaaaa;stop-opacity:1" id="stop_16" inkscape:label="shade_16_r66.7mm" />
+      <stop offset="0.708333" style="stop-color:#b5b5b5;stop-opacity:1" id="stop_17" inkscape:label="shade_17_r70.8mm" />
+      <stop offset="0.750000" style="stop-color:#bfbfbf;stop-opacity:1" id="stop_18" inkscape:label="shade_18_r75.0mm" />
+      <stop offset="0.791667" style="stop-color:#cacaca;stop-opacity:1" id="stop_19" inkscape:label="shade_19_r79.2mm" />
+      <stop offset="0.833333" style="stop-color:#d4d4d4;stop-opacity:1" id="stop_20" inkscape:label="shade_20_r83.3mm" />
+      <stop offset="0.875000" style="stop-color:#dfdfdf;stop-opacity:1" id="stop_21" inkscape:label="shade_21_r87.5mm" />
+      <stop offset="0.916667" style="stop-color:#eaeaea;stop-opacity:1" id="stop_22" inkscape:label="shade_22_r91.7mm" />
+      <stop offset="0.958333" style="stop-color:#f4f4f4;stop-opacity:1" id="stop_23" inkscape:label="shade_23_r95.8mm" />
+      <stop offset="1.000000" style="stop-color:#ffffff;stop-opacity:1" id="stop_24" inkscape:label="shade_24_r100.0mm" />
+      <stop offset="1.0" style="stop-color:#ffffff;stop-opacity:1" id="stop_edge" />
+    </radialGradient>
+  </defs>
+  <g id="layer_gradient" inkscape:label="Gradient" inkscape:groupmode="layer">
+    <circle id="gradient_circle" cx="453.5400" cy="453.5400" r="377.9500" style="fill:url(#optimisedGradient);stroke:none" inkscape:label="Gradient circle r=100.0mm" />
+  </g>
+  <g id="layer_registration" inkscape:label="Registration" inkscape:groupmode="layer" style="display:inline">
+    <circle id="registration_circle" cx="453.5400" cy="453.5400" r="377.9500" style="fill:none;stroke:#ff0000;stroke-width:0.5;stroke-dasharray:none" inkscape:label="Cut guide" />
+    <line id="crosshair_h" x1="423.3040" y1="453.5400" x2="483.7760" y2="453.5400" style="fill:none;stroke:#ff0000;stroke-width:0.5;stroke-dasharray:none" />
+    <line id="crosshair_v" x1="453.5400" y1="423.3040" x2="453.5400" y2="483.7760" style="fill:none;stroke:#ff0000;stroke-width:0.5;stroke-dasharray:none" />
+    <circle id="centre_dot" cx="453.5400" cy="453.5400" r="1.8898" style="fill:#ff0000;stroke:none" />
+  </g>
+  <g id="layer_annotations" inkscape:label="Annotations" inkscape:groupmode="layer" style="display:inline">
+    <text x="37.7950" y="30.2360" style="font-family:monospace;font-size:9px;font-weight:bold;fill:#000000">3pi+ Optimised Radial Gradient  |  r=100mm  |  25 shades</text>
+    <text x="37.7950" y="49.1335" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">Shade 0=black (centre)  →  Shade 24=white (edge)  |  stops at optimised radii</text>
+    <line x1="453.5400" y1="453.5400" x2="468.6580" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="472.4375" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s0 0.0mm</text>
+    <line x1="516.5317" y1="453.5400" x2="531.6497" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="535.4292" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s4 16.7mm</text>
+    <line x1="579.5233" y1="453.5400" x2="594.6413" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="598.4208" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s8 33.3mm</text>
+    <line x1="642.5150" y1="453.5400" x2="657.6330" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="661.4125" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s12 50.0mm</text>
+    <line x1="705.5067" y1="453.5400" x2="720.6247" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="724.4042" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s16 66.7mm</text>
+    <line x1="768.4983" y1="453.5400" x2="783.6163" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="787.3958" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s20 83.3mm</text>
+    <line x1="831.4900" y1="453.5400" x2="846.6080" y2="453.5400" style="stroke:#0000cc;stroke-width:0.4" />
+    <text x="850.3875" y="461.0990" style="font-family:monospace;font-size:7px;fill:#0000cc;stroke:none">s24 100.0mm</text>
+  </g>
+</svg>
