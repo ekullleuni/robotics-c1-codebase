@@ -5,11 +5,15 @@
  *  the 3Pi+ line sensor response.  Replaces
  *  the foraging FSM with three test phases:
  *
- *  Phase 1 (SHADE):    Static readings on the
- *      "25 Shades of Gray" map.  Human places
- *      robot on each patch; press B to capture
- *      N readings.  Data sent immediately over
- *      serial.
+ *  CALIBRATION (starts immediately on power-on):
+ *      Human places robot on each shade patch,
+ *      from BLACK first to WHITE last.
+ *      Press A to record the current shade.
+ *      Press B when all shades have been recorded.
+ *      Any number of shades are supported — the
+ *      robot assumes equal spacing between black
+ *      and white and sets line_sensors min/max/
+ *      scaling for all subsequent calibrated reads.
  *
  *  Phase 2 (GRADIENT): Continuous logging while
  *      the robot is pushed along a gradient map.
@@ -22,8 +26,8 @@
  *      logging sensors + encoders.  Autonomous
  *      drive, reverse, turn cycle.
  *
- *  Button A: advance to next test phase
- *  Button B: trigger action within each phase
+ *  Button A: record shade (calibration) / advance phase
+ *  Button B: finalise calibration / trigger within phase
  *
  *  Serial: 115200 baud, CSV output
  ******************************************/
@@ -49,10 +53,10 @@
 // TEST CONFIGURATION
 // ============================================
 
-// Phase 1: Shade test
-#define SAMPLES_PER_SHADE    50   // Readings per shade patch
-#define SAMPLE_DELAY_MS       5   // Delay between consecutive ADC reads (let ADC settle)
-#define NUM_SHADES           25   // Total shade patches on test map
+// Calibration phase
+#define MAX_CALIB_SHADES       50   // Hard upper limit on recorded shades (safety cap)
+#define CALIB_SAMPLES_PER_SHADE 20  // ADC readings averaged per shade
+#define SAMPLE_DELAY_MS          5  // Delay between consecutive ADC reads (let ADC settle)
 
 // Phase 2: Gradient test
 #define GRADIENT_LOG_INTERVAL_MS 10  // Log every 10 ms while being pushed
@@ -69,20 +73,26 @@ const int thinline_angles[NUM_THINLINE_ANGLES] = { 0, 15, 30, 45, 60, 75, 90 };
 // STATE MACHINE
 // ============================================
 enum TestPhase {
-  // Top-level waiting states (Button A transitions between these)
-  TEST_IDLE,                // Power on — waiting for first Button A press
-  TEST_SHADE_READY,         // Phase 1 ready — press B for each shade
-  TEST_SHADE_READING,       // Phase 1 actively taking readings
-  TEST_GRADIENT_READY,      // Phase 2 ready — press B to start/stop
-  TEST_GRADIENT_LOGGING,    // Phase 2 actively logging sensor data
-  TEST_THINLINE_READY,      // Phase 3 ready — press B to start sequence
-  TEST_THINLINE_DRIVE,      // Phase 3 driving across the line
-  TEST_THINLINE_REVERSE,    // Phase 3 reversing back to start
-  TEST_THINLINE_TURN,       // Phase 3 turning to next angle
-  TEST_COMPLETE             // All phases done
+  // ---- Calibration (robot starts here) ----
+  TEST_CALIB_WAITING,         // Waiting for A (record shade) or B (done)
+  TEST_CALIB_SAMPLING,        // Actively averaging samples for the current shade
+
+  // ---- Phase 2: Gradient test ----
+  TEST_GRADIENT_READY,        // Waiting for B to start a gradient strip
+  TEST_GRADIENT_LOGGING,      // Actively logging sensor data while pushed
+
+  // ---- Phase 3: Thin-line test ----
+  TEST_THINLINE_READY,        // Waiting for B to start the drive sequence
+  TEST_THINLINE_DRIVE,        // Driving across the line
+  TEST_THINLINE_REVERSE,      // Reversing back to start position
+  TEST_THINLINE_TURN,         // Turning to next crossing angle
+
+  // ---- Done ----
+  TEST_COMPLETE
 };
 
-TestPhase test_phase = TEST_IDLE;
+// Robot starts directly in calibration
+TestPhase test_phase = TEST_CALIB_WAITING;
 
 // ============================================
 // HARDWARE INSTANCES
@@ -145,10 +155,14 @@ bool buttonA() { return buttonPressed(BUTTON_A_PIN, btn_a_prev, btn_a_last); }
 bool buttonB() { return buttonPressed(BUTTON_B_PIN, btn_b_prev, btn_b_last); }
 
 // ============================================
-// PHASE 1 (SHADE) VARIABLES
+// CALIBRATION VARIABLES
 // ============================================
-int shade_id = 0;         // Current shade patch (0-24)
-int sample_count = 0;     // Samples taken so far for current shade
+// Stores the averaged ADC readings for each shade captured.
+// Index 0 = black (first pressed), last index = white (last pressed).
+float calib_readings[MAX_CALIB_SHADES][NUM_SENSORS];
+int   calib_shade_count   = 0;   // Number of shades recorded so far
+int   calib_sample_count  = 0;   // Samples accumulated for the shade being recorded
+float calib_accum[NUM_SENSORS];  // Running sum for the current shade's samples
 
 // ============================================
 // PHASE 2 (GRADIENT) VARIABLES
@@ -320,6 +334,71 @@ void printSensorCSV() {
 }
 
 // ============================================
+// CALIBRATION FUNCTION
+// ============================================
+// Called when the human presses B to signal that all shades
+// have been recorded.  Uses the first recorded shade as BLACK
+// and the last as WHITE, setting line_sensors.minimum[],
+// maximum[], and scaling[] for use by calcCalibratedADC().
+//
+// On the 3Pi+ hardware with INPUT_PULLUP, a black surface
+// gives HIGHER raw ADC values (phototransistor conducts less).
+// Therefore: maximum[] = black (shade 0), minimum[] = white (last shade).
+//
+// All shades are assumed to be equally spaced between black and
+// white.  The expected normalised level for shade k is:
+//   level = (N - 1 - k) / (N - 1)   → 1.0 for black, 0.0 for white
+void finalizeGradientCalibration() {
+  int N = calib_shade_count;
+
+  // Assign min/max to white and black shade readings respectively
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    // Shade 0 = black  → highest raw ADC → maximum
+    line_sensors.maximum[i] = calib_readings[0][i];
+    // Shade N-1 = white → lowest raw ADC  → minimum
+    line_sensors.minimum[i] = calib_readings[N - 1][i];
+    // scaling = range used by calcCalibratedADC()
+    line_sensors.scaling[i] = line_sensors.maximum[i] - line_sensors.minimum[i];
+    // Guard against zero range (identical readings)
+    if (line_sensors.scaling[i] == 0) line_sensors.scaling[i] = 1;
+  }
+
+  // Print calibration summary with expected normalised shade levels
+  Serial.println(F("#"));
+  Serial.println(F("# === CALIBRATION RESULTS ==="));
+  Serial.print(F("# Total shades recorded: "));
+  Serial.println(N);
+  Serial.println(F("# Expected shade spacing: equal (black=1.0, white=0.0)"));
+  Serial.println(F("#"));
+  Serial.println(F("# shade_index, expected_level, s0_avg, s1_avg, s2_avg, s3_avg, s4_avg"));
+  for (int k = 0; k < N; k++) {
+    float level = (float)(N - 1 - k) / (float)(N - 1);
+    Serial.print(k);
+    Serial.print(F(","));
+    Serial.print(level, 4);
+    for (int i = 0; i < NUM_SENSORS; i++) {
+      Serial.print(F(","));
+      Serial.print(calib_readings[k][i], 1);
+    }
+    Serial.println();
+  }
+
+  Serial.println(F("#"));
+  Serial.println(F("# Calibration values applied to line_sensors:"));
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    Serial.print(F("#   S"));
+    Serial.print(i);
+    Serial.print(F(": min="));
+    Serial.print(line_sensors.minimum[i], 1);
+    Serial.print(F("  max="));
+    Serial.print(line_sensors.maximum[i], 1);
+    Serial.print(F("  range="));
+    Serial.println(line_sensors.scaling[i], 1);
+  }
+  Serial.println(F("#"));
+}
+
+// ============================================
 // SETUP
 // ============================================
 void setup() {
@@ -360,15 +439,23 @@ void setup() {
   prev_e0  = count_e0;
   prev_e1  = count_e1;
 
-  // Welcome message
+  // Initialise calibration accumulator
+  for (int i = 0; i < NUM_SENSORS; i++) calib_accum[i] = 0.0;
+
+  // Welcome message — robot is already in the calibration routine
   Serial.println(F("# ========================================="));
   Serial.println(F("# LINE SENSOR SCIENTIFIC ANALYSIS"));
   Serial.println(F("# ========================================="));
-  Serial.println(F("# Press BUTTON A to begin Phase 1 (Shade Test)"));
-  Serial.println(F("# Baud: 115200"));
+  Serial.println(F("# CALIBRATION MODE — starting immediately."));
   Serial.println(F("#"));
+  Serial.println(F("# Place robot on the FIRST shade (BLACK)."));
+  Serial.println(F("# Press A to record. Move to next shade. Repeat."));
+  Serial.println(F("# Press B when the LAST shade (WHITE) has been recorded."));
+  Serial.println(F("# Any number of shades is supported."));
+  Serial.println(F("#"));
+  Serial.println(F("# Baud: 115200"));
 
-  // Short beep
+  // Short beep to signal ready
   tone(BUZZER_PIN, 440, 100);
 }
 
@@ -390,100 +477,88 @@ void loop() {
   switch (test_phase) {
 
     // ======================================================
-    // IDLE: waiting for Button A to start Phase 1
+    // CALIBRATION — waiting for A (record shade) or B (done)
     // ======================================================
-    case TEST_IDLE:
-      if (a_pressed) {
-        test_phase = TEST_SHADE_READY;
-        shade_id = 0;
-        Serial.println(F("#"));
-        Serial.println(F("# === PHASE 1: SHADE TEST (25 Shades of Gray) ==="));
-        Serial.println(F("# Place centre sensor over shade patch 1 (black)."));
-        Serial.println(F("# Press B to capture readings.  Press A when done to skip to Phase 2."));
-        Serial.println(F("#"));
-        Serial.println(F("# HEADER: shade_id, sample, timestamp_ms, s0, s1, s2, s3, s4"));
-        tone(BUZZER_PIN, 880, 100);
-      }
-      break;
+    case TEST_CALIB_WAITING:
 
-    // ======================================================
-    // PHASE 1: SHADE TEST — waiting for Button B
-    // ======================================================
-    case TEST_SHADE_READY:
-      // Button A: skip to Phase 2
       if (a_pressed) {
-        Serial.println(F("# --- Phase 1 complete (skipped to Phase 2) ---"));
+        // Guard: reached the hard cap
+        if (calib_shade_count >= MAX_CALIB_SHADES) {
+          Serial.println(F("# WARNING: Maximum shade count reached. Press B to finalise."));
+          break;
+        }
+
+        // Start averaging samples for this shade
+        for (int i = 0; i < NUM_SENSORS; i++) calib_accum[i] = 0.0;
+        calib_sample_count = 0;
+        test_phase = TEST_CALIB_SAMPLING;
+        tone(BUZZER_PIN, 660, 50);
+      }
+
+      if (b_pressed) {
+        // Require at least 2 shades: black (shade 0) and white (last shade)
+        if (calib_shade_count < 2) {
+          Serial.print(F("# Need at least 2 shades. Recorded so far: "));
+          Serial.println(calib_shade_count);
+          Serial.println(F("# Press A to record more shades, then press B."));
+          tone(BUZZER_PIN, 220, 300);
+          break;
+        }
+
+        // Finalise calibration and advance to Phase 2
+        finalizeGradientCalibration();
+
         test_phase = TEST_GRADIENT_READY;
         gradient_id = 0;
-        Serial.println(F("#"));
         Serial.println(F("# === PHASE 2: GRADIENT TEST ==="));
         Serial.println(F("# Place robot at black end of gradient strip."));
         Serial.println(F("# Push robot slowly along gradient."));
         Serial.println(F("# Press B to start logging, B again to stop."));
-        Serial.println(F("# Press A when done to skip to Phase 3."));
+        Serial.println(F("# Press A to skip to Phase 3."));
         Serial.println(F("#"));
         Serial.println(F("# HEADER: gradient_id, timestamp_ms, dist_left_mm, dist_right_mm, s0, s1, s2, s3, s4"));
-        tone(BUZZER_PIN, 880, 100);
-        break;
-      }
-
-      // Button B: begin capturing N readings for the current shade
-      if (b_pressed) {
-        sample_count = 0;
-        test_phase = TEST_SHADE_READING;
-        tone(BUZZER_PIN, 660, 50);
+        tone(BUZZER_PIN, 880, 200);
       }
       break;
 
     // ======================================================
-    // PHASE 1: SHADE TEST — actively taking readings
+    // CALIBRATION — averaging ADC samples for the current shade
     // ======================================================
-    case TEST_SHADE_READING: {
-      // Take one reading per loop iteration (with settling delay)
+    case TEST_CALIB_SAMPLING: {
+      // Accumulate one reading per loop iteration
       line_sensors.readSensorsADC();
+      for (int i = 0; i < NUM_SENSORS; i++) {
+        calib_accum[i] += line_sensors.readings[i];
+      }
+      calib_sample_count++;
 
-      // Output CSV line: shade_id, sample, timestamp_ms, s0, s1, s2, s3, s4
-      Serial.print(shade_id);
-      Serial.print(F(","));
-      Serial.print(sample_count);
-      Serial.print(F(","));
-      Serial.print(millis());
-      Serial.print(F(","));
-      printSensorCSV();
-      Serial.println();
+      // Small settling delay between ADC reads
+      delay(SAMPLE_DELAY_MS);
 
-      sample_count++;
-
-      if (sample_count >= SAMPLES_PER_SHADE) {
-        // Shade complete
-        shade_id++;
-        Serial.print(F("# Shade "));
-        Serial.print(shade_id);
-        Serial.print(F("/"));
-        Serial.print(NUM_SHADES);
-        Serial.println(F(" complete.  Move to next patch, press B."));
-
-        if (shade_id >= NUM_SHADES) {
-          // All shades done — auto-advance to gradient
-          Serial.println(F("# --- Phase 1 complete (all shades captured) ---"));
-          test_phase = TEST_GRADIENT_READY;
-          gradient_id = 0;
-          Serial.println(F("#"));
-          Serial.println(F("# === PHASE 2: GRADIENT TEST ==="));
-          Serial.println(F("# Place robot at black end of gradient strip."));
-          Serial.println(F("# Push robot slowly along gradient."));
-          Serial.println(F("# Press B to start logging, B again to stop."));
-          Serial.println(F("# Press A when done to skip to Phase 3."));
-          Serial.println(F("#"));
-          Serial.println(F("# HEADER: gradient_id, timestamp_ms, dist_left_mm, dist_right_mm, s0, s1, s2, s3, s4"));
-          tone(BUZZER_PIN, 880, 200);
-        } else {
-          tone(BUZZER_PIN, 440, 100);
-          test_phase = TEST_SHADE_READY;
+      if (calib_sample_count >= CALIB_SAMPLES_PER_SHADE) {
+        // Average the accumulated readings and store
+        for (int i = 0; i < NUM_SENSORS; i++) {
+          calib_readings[calib_shade_count][i] = calib_accum[i] / (float)calib_sample_count;
         }
-      } else {
-        // Small delay for ADC settling between samples
-        delay(SAMPLE_DELAY_MS);
+        calib_shade_count++;
+
+        // Report the recorded shade
+        Serial.print(F("# Shade "));
+        Serial.print(calib_shade_count);
+        if (calib_shade_count == 1) {
+          Serial.print(F(" (BLACK) recorded: "));
+        } else {
+          Serial.print(F(" recorded: "));
+        }
+        for (int i = 0; i < NUM_SENSORS; i++) {
+          Serial.print(calib_readings[calib_shade_count - 1][i], 1);
+          if (i < NUM_SENSORS - 1) Serial.print(F(", "));
+        }
+        Serial.println();
+        Serial.println(F("# Move to next shade and press A.  When WHITE is done, press B."));
+
+        test_phase = TEST_CALIB_WAITING;
+        tone(BUZZER_PIN, 880, 100);
       }
       break;
     }
@@ -693,7 +768,6 @@ void loop() {
           tone(BUZZER_PIN, 880, 200);
         } else {
           // Turn to the next angle increment
-          // Each step is (thinline_angles[idx] - thinline_angles[idx-1]) degrees
           float delta_deg = (float)(thinline_angles[tl_angle_idx] - thinline_angles[tl_angle_idx - 1]);
           float delta_rad = delta_deg * PI / 180.0;
 
