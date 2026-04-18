@@ -1,5 +1,5 @@
 /******************************************
-  Radial-Gradient Centre-Finder FSM
+  Radial-Gradient Centre-Finder FSM  [simplified-orient branch]
 
   Null-seeking orientation + straight-line travel on a radial
   grayscale gradient map.  See RadialGradient_FSM_Plan.md.
@@ -11,14 +11,19 @@
 
   Flow per run:
     1. STATE_WAIT_START          — power-on / post-run; Button A starts run (zeroes pose + timer).
-    2. STATE_ORIENT_SEEK_NULL    — rotate in-place until L[0] == L[4].
-    4. STATE_ORIENT_MEASURE_A    — record centre reading A.
-    5. STATE_ORIENT_FLIP_180     — non-blocking 180° flip.
-    6. STATE_ORIENT_MEASURE_B    — record centre reading B.
-    7. STATE_ORIENT_RESOLVE      — if A was darker, flip back.
-    8. STATE_TRAVEL              — drive forward, monitor for arrival
+    2. STATE_INITIAL_CHECK       — compare side sensors on Button A:
+                                     equal within tolerance → rotate 90°, go to ORIENT_SEEK_NULL
+                                     unequal              → go to ORIENT_SEEK_NULL directly
+    3. STATE_INITIAL_ROTATE      — non-blocking 90° rotation (only when sensors were equal)
+    4. STATE_ORIENT_SEEK_NULL    — rotate in-place until L[0] == L[4]; proceed to TRAVEL.
+    5. STATE_TRAVEL              — drive forward, monitor for arrival
                                    or loss of alignment.
-    9. STATE_AT_CENTRE / DONE    — display results, Button A restarts.
+    6. STATE_AT_CENTRE / DONE    — display results, Button A restarts.
+
+  NOTE: The 180° direction-check states (MEASURE_A, FLIP_180, MEASURE_B, RESOLVE) are
+  intentionally disabled in this branch.  They are retained in the enum for reference.
+  The initial 90° rotation when sensors are equal is sufficient to avoid starting
+  perpendicular to the gradient, eliminating the need for the opposite-direction check.
 
   SEMTM0042/43: University of Bristol.
 *******************************************/
@@ -100,11 +105,14 @@ bool  rotating           = false;
 // ============================================
 enum GradientState {
   STATE_WAIT_START,         // Power-on / post-run; A places robot and starts run
+  STATE_INITIAL_CHECK,      // Immediately after A: compare side sensors, decide whether to pre-rotate
+  STATE_INITIAL_ROTATE,     // 90° pre-rotation (only when side sensors were equal within tolerance)
   STATE_ORIENT_SEEK_NULL,   // Rotating; looking for edge sensors to equalise
-  STATE_ORIENT_MEASURE_A,   // Null found; settle, then record centre reading A
-  STATE_ORIENT_FLIP_180,    // Non-blocking 180° rotation
-  STATE_ORIENT_MEASURE_B,   // After flip; settle, then record centre B and choose darker
-  STATE_ORIENT_RESOLVE,     // If chosen heading was A, rotate 180° back; else proceed
+  // --- disabled states (180° direction-check; kept for reference) ---
+  // STATE_ORIENT_MEASURE_A,
+  // STATE_ORIENT_FLIP_180,
+  // STATE_ORIENT_MEASURE_B,
+  // STATE_ORIENT_RESOLVE,
   STATE_TRAVEL,             // Drive forward; monitor for arrival or lost alignment
   STATE_AT_CENTRE,          // Centre found (or timeout); hold results on OLED
   STATE_DONE                // Idle; Button A restarts
@@ -478,6 +486,14 @@ void updateGradientDisplay() {
       display.print("map. A!");
       break;
 
+    case STATE_INITIAL_CHECK:
+      display.print("ChkSens");
+      break;
+
+    case STATE_INITIAL_ROTATE:
+      display.print("Rot90");
+      break;
+
     case STATE_ORIENT_SEEK_NULL: {
       float L[NUM_SENSORS];
       readLightness(L);
@@ -489,27 +505,6 @@ void updateGradientDisplay() {
       display.print("%");
       break;
     }
-
-    case STATE_ORIENT_MEASURE_A:
-      display.print("MeasA");
-      break;
-
-    case STATE_ORIENT_FLIP_180:
-      display.print("Flip180");
-      break;
-
-    case STATE_ORIENT_MEASURE_B:
-      display.print("Check");
-      display.gotoXY(0, 1);
-      display.print("A:");
-      display.print(centre_A, 0);
-      display.print(" B:");
-      display.print(centre_B, 0);
-      break;
-
-    case STATE_ORIENT_RESOLVE:
-      display.print("Back180");
-      break;
 
     case STATE_TRAVEL: {
       float L[NUM_SENSORS];
@@ -550,7 +545,7 @@ void loop() {
         placement_debug_ts = millis();
       }
       if (buttonAPressed()) {
-        Serial.println("DBG: A pressed in WAIT_START -> ORIENT_SEEK_NULL");
+        Serial.println("DBG: A pressed in WAIT_START -> INITIAL_CHECK");
         pose.initialise(0, 0, 0);
         pose_update_ts      = millis();
         run_start_ms        = millis();
@@ -563,6 +558,50 @@ void loop() {
         Serial.println();
         Serial.println("--- RUN STARTED ---");
 
+        grad_state = STATE_INITIAL_CHECK;
+      }
+      break;
+
+    // ========================================================
+    // INITIAL_CHECK: read side sensors; if equal within tolerance
+    //   rotate 90° before seeking null (avoids starting perpendicular
+    //   to the gradient with no net signal to follow).
+    //   If unequal, go straight to ORIENT_SEEK_NULL.
+    // ========================================================
+    case STATE_INITIAL_CHECK: {
+      float L[NUM_SENSORS];
+      readLightness(L);
+      float edge_err = fabs(L[0] - L[4]);
+
+      Serial.print("INITIAL_CHECK  L0:");
+      Serial.print(L[0], 1);
+      Serial.print(" L4:");
+      Serial.print(L[4], 1);
+      Serial.print(" dE:");
+      Serial.println(edge_err, 2);
+
+      if (edge_err <= EDGE_EQUAL_TOLERANCE) {
+        // Sensors equal — robot is perpendicular to gradient; pre-rotate 90°
+        Serial.println("INITIAL_CHECK  sensors equal -> rotating 90 deg");
+        setRotation(PI / 2.0f);
+        grad_state = STATE_INITIAL_ROTATE;
+      } else {
+        // Sensors unequal — already at an angle to the gradient; seek null directly
+        Serial.println("INITIAL_CHECK  sensors unequal -> ORIENT_SEEK_NULL");
+        null_dwell_start_ts = 0;
+        grad_state = STATE_ORIENT_SEEK_NULL;
+      }
+      break;
+    }
+
+    // ========================================================
+    // INITIAL_ROTATE: non-blocking 90° rotation after equal-sensor check
+    // ========================================================
+    case STATE_INITIAL_ROTATE:
+      if (checkRotation()) {
+        stopWithPID();
+        Serial.println("INITIAL_ROTATE  done -> ORIENT_SEEK_NULL");
+        null_dwell_start_ts = 0;
         grad_state = STATE_ORIENT_SEEK_NULL;
       }
       break;
@@ -599,13 +638,17 @@ void loop() {
         debug_print_ts = millis();
       }
 
-      // Dwell check: edges stay close for NULL_DWELL_MS
+      // Dwell check: edges stay close for NULL_DWELL_MS; then travel directly.
+      // (180° direction-check is disabled — see header comment)
       if (edge_err < EDGE_EQUAL_TOLERANCE) {
         if (null_dwell_start_ts == 0) null_dwell_start_ts = millis();
         if (millis() - null_dwell_start_ts >= NULL_DWELL_MS) {
           stopWithPID();
-          settle_start_ts = millis();
-          grad_state = STATE_ORIENT_MEASURE_A;
+          Serial.println("ORIENT  null found -> TRAVEL");
+          travel_read_ts  = millis();
+          arrival_confirm = 0;
+          lost_confirm    = 0;
+          grad_state = STATE_TRAVEL;
         }
       } else {
         null_dwell_start_ts = 0;
@@ -614,84 +657,11 @@ void loop() {
     }
 
     // ========================================================
-    // ORIENT_MEASURE_A: settle, sample centre, command 180° flip
+    // [DISABLED] 180° direction-check states: MEASURE_A, FLIP_180,
+    // MEASURE_B, RESOLVE.  The initial 90° pre-rotation in
+    // STATE_INITIAL_CHECK eliminates the need to verify which
+    // half of the null is darker.  See header comment for rationale.
     // ========================================================
-    case STATE_ORIENT_MEASURE_A: {
-      if (millis() - settle_start_ts < ORIENT_SETTLE_MS) break;
-
-      float L[NUM_SENSORS];
-      readLightness(L);
-      theta_A  = pose.theta;
-      centre_A = L[2];
-
-      Serial.print("ORIENT  null A: theta=");
-      Serial.print(theta_A * 180.0f / PI, 1);
-      Serial.print(" deg, centre_A=");
-      Serial.print(centre_A, 1);
-      Serial.println("%");
-
-      setRotation(PI);
-      grad_state = STATE_ORIENT_FLIP_180;
-      break;
-    }
-
-    // ========================================================
-    // ORIENT_FLIP_180: non-blocking 180° rotation
-    // ========================================================
-    case STATE_ORIENT_FLIP_180:
-      if (checkRotation()) {
-        stopWithPID();
-        settle_start_ts = millis();
-        grad_state = STATE_ORIENT_MEASURE_B;
-      }
-      break;
-
-    // ========================================================
-    // ORIENT_MEASURE_B: settle, sample centre, pick darker heading
-    // ========================================================
-    case STATE_ORIENT_MEASURE_B: {
-      if (millis() - settle_start_ts < ORIENT_SETTLE_MS) break;
-
-      float L[NUM_SENSORS];
-      readLightness(L);
-      theta_B  = pose.theta;
-      centre_B = L[2];
-
-      Serial.print("ORIENT  null B: theta=");
-      Serial.print(theta_B * 180.0f / PI, 1);
-      Serial.print(" deg, centre_B=");
-      Serial.print(centre_B, 1);
-      Serial.println("%");
-
-      if (centre_B < centre_A) {
-        // Already facing darker direction — no further turn.
-        chosen_theta = theta_B;
-        Serial.println("ORIENT  chose heading B");
-        travel_read_ts = millis();
-        arrival_confirm = 0;
-        lost_confirm    = 0;
-        grad_state = STATE_TRAVEL;
-      } else {
-        chosen_theta = theta_A;
-        Serial.println("ORIENT  chose heading A; flipping back");
-        setRotation(PI);
-        grad_state = STATE_ORIENT_RESOLVE;
-      }
-      break;
-    }
-
-    // ========================================================
-    // ORIENT_RESOLVE: second 180° flip back to theta_A
-    // ========================================================
-    case STATE_ORIENT_RESOLVE:
-      if (checkRotation()) {
-        stopWithPID();
-        travel_read_ts  = millis();
-        arrival_confirm = 0;
-        lost_confirm    = 0;
-        grad_state = STATE_TRAVEL;
-      }
-      break;
 
     // ========================================================
     // TRAVEL: straight forward, monitor for arrival or drift
