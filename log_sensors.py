@@ -2,23 +2,30 @@
 log_sensors.py
 --------------
 Captures serial data from the LineSensorTest Arduino sketch
-and saves it to a timestamped CSV file.
+and saves it to a CSV file whose name encodes the number of
+shade captures.
 
 Usage:
-    python log_sensors.py                  # auto-detect port
-    python log_sensors.py /dev/tty.usbmodem1234  # specify port
+    python log_sensors.py                           # auto-detect port
+    python log_sensors.py --shades 25               # pre-declare expected count
+    python log_sensors.py /dev/tty.usbmodem1234     # specify port
+    python log_sensors.py /dev/tty.usbmodem1234 --shades 25
 
-Output files are written to  data/<YYYYMMDD_HHMMSS>.csv
-Comment lines (starting with #) are echoed to the terminal but also
-saved in the file so you can reconstruct what happened.
+Output files are written to  data/<N>shades_<YYYYMMDD_HHMMSS>.csv
+where <N> is the number of unique shade_id values captured.
+Comment lines (starting with #) are echoed to the terminal and
+also saved in the file so you can reconstruct what happened.
 
-Press Ctrl+C to stop at any time; the file is safely closed first.
+Press Ctrl+C to stop at any time; the temp file is closed and
+renamed so no data is lost.
 """
 
 import serial
 import serial.tools.list_ports
 import sys
 import os
+import re
+import argparse
 import datetime
 
 # -----------------------------------------------------------------------
@@ -40,7 +47,6 @@ def find_port():
                                     or "arduino"   in p.description.lower()
                                     or "tty.usb"   in p.device.lower()]
     if not candidates:
-        # Fall back to listing everything so the user can choose
         print("No Arduino/USB serial port auto-detected.")
         print("Available ports:")
         for p in ports:
@@ -50,7 +56,6 @@ def find_port():
     if len(candidates) == 1:
         return candidates[0].device
 
-    # Multiple candidates — pick the first and warn
     print("Multiple USB serial ports found; using the first:")
     for p in candidates:
         print(f"  {p.device}  —  {p.description}")
@@ -58,26 +63,67 @@ def find_port():
 
 
 # -----------------------------------------------------------------------
+# Argument parsing
+# -----------------------------------------------------------------------
+def parse_args():
+    """Accept an optional positional port and an optional --shades count."""
+    parser = argparse.ArgumentParser(
+        description="Log line-sensor calibration CSV from an Arduino sketch.",
+        add_help=True,
+    )
+    parser.add_argument("port", nargs="?", default=None,
+                        help="Serial port (auto-detected if omitted)")
+    parser.add_argument("--shades", type=int, default=None,
+                        help="Expected number of shade captures (optional)")
+    return parser.parse_args()
+
+
+# -----------------------------------------------------------------------
+# Shade counting
+# -----------------------------------------------------------------------
+def count_shades(path):
+    """Count unique shade_id values in the CSV (skips comments/blank lines)."""
+    ids = set()
+    try:
+        with open(path, "r", encoding=ENCODING) as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.split(",")
+                try:
+                    ids.add(int(parts[0]))
+                except (ValueError, IndexError):
+                    continue
+    except FileNotFoundError:
+        return 0
+    return len(ids)
+
+
+# -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
 def main():
-    # Resolve serial port
-    port = sys.argv[1] if len(sys.argv) > 1 else find_port()
+    args = parse_args()
+    port = args.port if args.port else find_port()
     print(f"Connecting to {port} at {BAUD_RATE} baud …")
+    if args.shades is not None:
+        print(f"Expected shade count: {args.shades}")
 
-    # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Build a timestamped filename
+    # The final filename depends on how many shades we actually captured,
+    # which we don't know until Ctrl+C. Write to a temp name first and
+    # rename on exit.
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename  = os.path.join(OUTPUT_DIR, f"{timestamp}.csv")
+    tmp_path  = os.path.join(OUTPUT_DIR, f"_tmp_{timestamp}.csv")
 
-    print(f"Saving to: {filename}")
+    print(f"Saving to (temp): {tmp_path}")
     print("Press Ctrl+C to stop logging.\n")
     print("─" * 60)
 
     data_line_count    = 0
     comment_line_count = 0
+    shade_progress_re  = re.compile(r"#\s*Shade\s+(\d+)\s+complete", re.IGNORECASE)
 
     def open_port():
         """Open serial port, retrying until successful (handles post-upload USB reset)."""
@@ -93,13 +139,12 @@ def main():
     ser = open_port()
 
     try:
-        with open(filename, "w", newline="", encoding=ENCODING) as f:
+        with open(tmp_path, "w", newline="", encoding=ENCODING) as f:
 
             while True:
                 try:
                     raw = ser.readline()
                 except serial.SerialException:
-                    # Device disconnected (e.g. USB reset after flash) — reconnect
                     print("\nPort lost — reconnecting …")
                     try: ser.close()
                     except Exception: pass
@@ -107,20 +152,29 @@ def main():
                     continue
 
                 if not raw:
-                    continue  # Timeout — loop again
+                    continue
 
                 try:
                     line = raw.decode(ENCODING).rstrip("\r\n")
                 except UnicodeDecodeError:
-                    continue  # Skip garbled bytes on connect
+                    continue
 
-                # Save every line (data + comments) to the file
+                # Persist every line immediately so Ctrl+C never loses data
                 f.write(line + "\n")
-                f.flush()  # Write to disk immediately — no data lost on Ctrl+C
+                f.flush()
 
-                # Print to terminal
+                # Highlight shade-complete comments so the operator can see progress
+                m = shade_progress_re.match(line)
+                if m:
+                    done = int(m.group(1)) + 1   # shade_id is zero-indexed
+                    if args.shades is not None:
+                        banner = f">>> PROGRESS: {done}/{args.shades} shades captured"
+                    else:
+                        banner = f">>> PROGRESS: {done} shades captured"
+                    print(f"\033[93m{banner}\033[0m")   # yellow
+
                 if line.startswith("#"):
-                    print(f"\033[90m{line}\033[0m")   # grey
+                    print(f"\033[90m{line}\033[0m")     # grey
                     comment_line_count += 1
                 elif line.strip():
                     print(line)
@@ -128,14 +182,33 @@ def main():
 
     except KeyboardInterrupt:
         print("\n" + "─" * 60)
-        print(f"Logging stopped.")
-        print(f"  Data rows saved : {data_line_count}")
-        print(f"  Comment lines   : {comment_line_count}")
-        print(f"  File            : {filename}")
+        print("Logging stopped.")
 
     finally:
         try: ser.close()
         except Exception: pass
+
+    # Finalise the filename using the actual shade count (outside finally so
+    # we don't accidentally swallow exceptions from the logging loop)
+    n_shades = count_shades(tmp_path)
+    print(f"  Data rows saved : {data_line_count}")
+    print(f"  Comment lines   : {comment_line_count}")
+
+    if n_shades == 0:
+        print(f"  No shade data captured — leaving temp file: {tmp_path}")
+        return
+
+    final_path = os.path.join(OUTPUT_DIR, f"{n_shades}shades_{timestamp}.csv")
+    try:
+        os.rename(tmp_path, final_path)
+    except OSError as e:
+        print(f"  Rename failed ({e}); data remains at {tmp_path}")
+        return
+
+    print(f"  Shades captured : {n_shades}")
+    if args.shades is not None and n_shades != args.shades:
+        print(f"  NOTE: expected {args.shades} shades, got {n_shades}")
+    print(f"  Saved as        : {final_path}")
 
 
 if __name__ == "__main__":
